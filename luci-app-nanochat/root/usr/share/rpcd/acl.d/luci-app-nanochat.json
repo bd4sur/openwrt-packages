@@ -1,0 +1,21 @@
+{
+    "luci-app-nanochat": {
+        "description": "Grant UCI and RPC access to LuCI app nanochat",
+        "read": {
+            "ubus": {
+                "luci.nanochat": [
+                    "action_stop",
+                    "action_restart"
+                ]
+            },
+            "uci": [
+                "nanochat"
+            ]
+        },
+        "write": {
+            "uci": [
+                "nanochat"
+            ]
+        }
+    }
+}

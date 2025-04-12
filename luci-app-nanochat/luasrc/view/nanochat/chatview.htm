@@ -1,0 +1,94 @@
+<script>
+function handleAction(action) {
+    let url = '<%=luci.dispatcher.build_url("admin", "services", "nanochat")%>/' + action;
+    fetch(url, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Action succeeded' + action);
+            } else {
+                alert('Action failed' + action);
+            }
+        })
+        .catch(error => console.error('Error:', error));
+}
+
+let ws = null;
+function sendQuestion() {
+    let question = document.getElementById('question').value.trim();
+    if (!question) return;
+    if (ws) {
+        ws.close();
+    }
+    document.getElementById('llm_response').textContent = "Pre-filling...";
+
+    ws = new WebSocket('ws://' + location.hostname + ':8080/chat');
+
+    ws.onopen = function () {
+        let prompt = `<|instruct_mark|>${question}<|response_mark|>`;
+        let prompt_len = `000${prompt.length}`.slice(-5);
+        let msg = `${prompt_len}|${prompt}`;
+        ws.send(msg);
+    };
+    ws.onmessage = function (event) {
+        document.getElementById('llm_response').textContent = event.data;
+    };
+    ws.onerror = function (error) {
+        console.error('WebSocket Error:', error);
+    };
+}
+</script>
+
+<%+header%>
+<div class="cbi-map">
+    <style>
+.Top {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    height: 30px;
+    padding: 0px 0px 12px 0px;
+    font-size: 20px;
+    color: #d2d6dd;
+    background-color: #fff;
+    border-radius: 20px 20px 0px 0px;
+}
+.Nano {
+    font-weight: bold;
+    background-image: -webkit-linear-gradient(320deg, #00e2ff, #003cff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+    </style>
+
+    <div class="Top">
+        <div>
+            <span class="Nano">NanoLM</span><span style="margin-left: 10px; border-left: 1px solid #9fa1a8; padding-left: 10px; color: #000; font-weight: 100; font-size: smaller;" id="model_name">Inference on OpenWrt LuCI</span>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; font-size: 13px;">
+            <div><b>BD4SUR</b> 2025-04-12</div>
+        </div>
+    </div>
+
+    <div class="cbi-section">
+        <div class="cbi-value">
+            <textarea id="question" rows="3" style="width:100%;">人类的本质是复读机吗？</textarea>
+        </div>
+        <div class="cbi-value">
+            <button class="cbi-button cbi-button-action important" onclick="sendQuestion()">提交</button>
+            <span style="width: 10px;"> </span>
+            <button class="cbi-button cbi-button-reset" value="Stop Service" onclick="handleAction('action_stop')">停止服务</button>
+            <span style="width: 10px;"> </span>
+            <button class="cbi-button cbi-button-apply" value="Restart Service" onclick="handleAction('action_restart')">重启服务</button>
+        </div>
+        <div class="cbi-value">
+            <pre id="llm_response" style="border:1px solid #ddd; padding:10px; width:100%;"></pre>
+        </div>
+    </div>
+</div>
+<%+footer%>

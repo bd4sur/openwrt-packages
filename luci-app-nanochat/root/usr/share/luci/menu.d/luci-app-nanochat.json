@@ -1,0 +1,10 @@
+{
+    "admin/services/nanochat": {
+        "title": "Nano语言模型",
+        "order": 1,
+        "action": {
+            "type": "view",
+            "path": "nanochat/chatview"
+        }
+    }
+}
