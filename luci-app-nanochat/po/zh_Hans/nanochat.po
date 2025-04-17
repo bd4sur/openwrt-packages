@@ -1,0 +1,32 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "Chat with Nano LM"
+msgstr "与Nano语言模型对话"
+
+msgid "Chat Setting"
+msfstr "对话设置"
+
+msgid "Model path"
+msfstr "模型路径"
+
+msgid "Input absolute path to model file"
+msfstr "请输入模型的绝对路径"
+
+msgid "Absolute path to model file (.bin)"
+msfstr "模型文件(.bin)的绝对路径。"
+
+msgid "Max sequence length"
+msfstr "最大序列长度"
+
+msgid "The maximum length of the generated text and the prompt."
+msfstr "提示词和生成文本的总长度。"
+
+msgid "Server port"
+msfstr "服务端口"
+
+msgid "default: 8080"
+msfstr "默认端口：8080"
+
+msgid "The port which model service is listening."
+msfstr "推理后台服务监听LuCI前端的端口。"

@@ -1,0 +1,4 @@
+config nanochat 'config'
+option path '/emmc/_model/nano_168m_625000_sft_947000.bin'
+option max_len '512'
+option port '8080'

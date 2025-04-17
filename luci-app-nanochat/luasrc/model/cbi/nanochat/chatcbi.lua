@@ -1,3 +1,0 @@
--- m = Map("nanochat", translate("Nano LM LuCI WebUI"), "Nano电子鹦鹉的OpenWrt用户界面")
--- m:section(SimpleSection).template = "nanochat/chatview"
--- return m

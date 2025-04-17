@@ -1,0 +1,21 @@
+<script type="text/javascript">//<![CDATA[
+XHR.poll(3, '<%=url([[admin]], [[services]], [[nanochat]], [[action_status]])%>', null,
+    function (x, data) {
+        var tb = document.getElementById('nanochat_status');
+        if (data && tb) {
+            if (data.running) {
+                var links = '<b><font color=green>Nano LM <%:RUNNING%></font></b>';
+                tb.innerHTML = links;
+            } else {
+                tb.innerHTML = '<b><font color=red>Nano LM <%:NOT RUNNING%></font></b>';
+            }
+        }
+    }
+);
+//]]>
+</script>
+<fieldset class="cbi-section">
+    <p id="nanochat_status">
+        <em><%:Collecting data...%></em>
+    </p>
+</fieldset>
