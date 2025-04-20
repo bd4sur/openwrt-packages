@@ -1,0 +1,32 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "LCD1602 Screen"
+msgstr "LCD1602屏幕"
+
+msgid "LCD1602 Screen Settings"
+msfstr "LCD1602屏幕设置"
+
+msgid "Display content"
+msfstr "显示内容"
+
+msgid "Contents to be displayed on the LCD."
+msfstr "液晶屏上显示的内容"
+
+msgid "Absolute path to model file (.bin)"
+msfstr "模型文件(.bin)的绝对路径。"
+
+msgid "Max sequence length"
+msfstr "最大序列长度"
+
+msgid "The maximum length of the generated text and the prompt."
+msfstr "提示词和生成文本的总长度。"
+
+msgid "Server port"
+msfstr "服务端口"
+
+msgid "default: 8080"
+msfstr "默认端口：8080"
+
+msgid "The port which model service is listening."
+msfstr "推理后台服务监听LuCI前端的端口。"

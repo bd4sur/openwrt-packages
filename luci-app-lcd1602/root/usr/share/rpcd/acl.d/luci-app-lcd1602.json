@@ -1,0 +1,21 @@
+{
+    "luci-app-lcd1602": {
+        "description": "Grant UCI and RPC access to LuCI app lcd1602",
+        "read": {
+            "ubus": {
+                "luci.lcd1602": [
+                    "action_stop",
+                    "action_restart"
+                ]
+            },
+            "uci": [
+                "lcd1602"
+            ]
+        },
+        "write": {
+            "uci": [
+                "lcd1602"
+            ]
+        }
+    }
+}

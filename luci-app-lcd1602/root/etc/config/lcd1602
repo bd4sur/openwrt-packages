@@ -1,0 +1,4 @@
+config lcd1602 'config'
+option enabled '1'
+option content '   BD4SUR OpenWrt                       2025-04-20  01:20:00     ARE YOU OK?    '
+option backlignt '1'

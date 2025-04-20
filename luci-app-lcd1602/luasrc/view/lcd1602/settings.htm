@@ -1,0 +1,21 @@
+<script type="text/javascript">//<![CDATA[
+XHR.poll(3, '<%=url([[admin]], [[services]], [[lcd1602]], [[action_status]])%>', null,
+    function (x, data) {
+        var tb = document.getElementById('lcd1602_status');
+        if (data && tb) {
+            if (data.running) {
+                var links = '<b><font color=green>LCD1602 <%:RUNNING%></font></b>';
+                tb.innerHTML = links;
+            } else {
+                tb.innerHTML = '<b><font color=red>LCD1602 <%:NOT RUNNING%></font></b>';
+            }
+        }
+    }
+);
+//]]>
+</script>
+<fieldset class="cbi-section">
+    <p id="lcd1602_status">
+        <em><%:Collecting data...%></em>
+    </p>
+</fieldset>
