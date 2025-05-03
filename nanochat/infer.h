@@ -33,6 +33,11 @@
 #define STATUS_STOPPED    (21)
 #define MAX_TOKEN_LENGTH  (17) // NOTE 虽然可以扫描词表得到该值，但是考虑到性能，设置为固定值（对于16384词表而言，至少17）
 
+#define LLM_STOPPED_WITH_ERROR    (-1)
+#define LLM_STOPPED_NORMALLY      (0)
+#define LLM_STOPPED_IN_PREFILLING (1)
+#define LLM_STOPPED_IN_DECODING   (2)
+
 // ===============================================================================
 // 数据结构定义
 // ===============================================================================
@@ -177,7 +182,7 @@ wchar_t *apply_template_to_str(char *str, unsigned int max_seq_len);
 
 unsigned int generate_next_token(Nano_Context ctx, unsigned int *output_ids, unsigned int pos, int is_prefilling);
 
-void generate(
+int32_t generate(
     Nano_Context ctx,
     wchar_t *prompt,
     unsigned int max_seq_len,

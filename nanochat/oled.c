@@ -406,8 +406,8 @@ uint8_t *get_glyph(uint32_t utf32, uint8_t *font_width, uint8_t *font_height) {
     }
 }
 
-
-void render_line(wchar_t *line, uint32_t x, uint32_t y) {
+// 渲染一行文本，mode为1则为正显，为0则为反白
+void render_line(wchar_t *line, uint32_t x, uint32_t y, uint8_t mode) {
     uint32_t x_pos = x;
     uint32_t y_pos = y;
     for (uint32_t i = 0; i < wcslen(line); i++) {
@@ -422,7 +422,7 @@ void render_line(wchar_t *line, uint32_t x, uint32_t y) {
         if (x_pos + font_width >= 128) {
             break;
         }
-        OLED_ShowChar(x_pos, y_pos, glyph, font_width, font_height, 1);
+        OLED_ShowChar(x_pos, y_pos, glyph, font_width, font_height, (mode % 2));
         x_pos += font_width;
     }
 }

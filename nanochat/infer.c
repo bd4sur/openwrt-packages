@@ -936,7 +936,7 @@ long time_in_ms() {
     return time.tv_sec * 1000 + time.tv_nsec / 1000000;
 }
 
-void generate(
+int32_t generate(
     Nano_Context ctx,
 
     wchar_t *prompt,
@@ -947,6 +947,8 @@ void generate(
     uint32_t (*on_decoding)(wchar_t*, uint32_t, float),
     uint32_t (*on_finished)(float, uint32_t)
 ) {
+
+    int32_t flag = 0;
 
     Tokenizer *tokenizer = ctx.tokenizer;
 
@@ -977,8 +979,12 @@ void generate(
         next_token = generate_next_token(ctx, output_ids, pos, is_prefilling);
 
         if(is_prefilling == 1) {
-            uint32_t flag = on_prefilling(prompt, pos, num_prompt_tokens);
-            if (flag == 1) break; // 主动中止
+            int32_t callback_flag = on_prefilling(prompt, pos, num_prompt_tokens);
+            // 外部被动中止
+            if (callback_flag > 0) {
+                flag = LLM_STOPPED_IN_PREFILLING; // 在预填充阶段被动中止
+                break;
+            }
         }
         else if(is_prefilling == 0) {
             output_ids[num_prompt_tokens + output_count++] = next_token;
@@ -986,15 +992,22 @@ void generate(
 
             float tps = (pos-1) / (double)(time_in_ms() - t_0) * 1000;
 
-            uint32_t flag = on_decoding(output_text, pos, tps);
+            int32_t callback_flag = on_decoding(output_text, pos, tps);
             free(output_text);
 
-            if (flag == 1) break; // 主动中止
+            // 外部被动中止
+            if (callback_flag > 0) {
+                flag = LLM_STOPPED_IN_DECODING; // 在解码阶段被动中止
+                break;
+            }
         }
 
         pos++;
 
-        if(next_token == 0 || next_token == 3) break;
+        if(next_token == 0 || next_token == 3) {
+            flag = LLM_STOPPED_NORMALLY; // 遇到结束符号，主动结束
+            break;
+        }
     }
 
     t_1 = time_in_ms();
@@ -1003,6 +1016,8 @@ void generate(
 
     free(output_ids);
     free(prompt_tokens);
+
+    return flag;
 }
 
 
