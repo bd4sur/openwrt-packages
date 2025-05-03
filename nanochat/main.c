@@ -726,5 +726,10 @@ STATE_10:   // 提交候选字到LLM，开始推理
     unload_model();
 
     OLED_Close();
+
+#ifdef MATMUL_PTHREAD
+    global_cleanup();
+#endif
+
     return 0;
 }

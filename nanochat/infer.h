@@ -17,6 +17,13 @@
 // 是否使用mmap？
 // #define NANO_USE_MMAP
 
+// 是否使用pthread实现的matmul？（用于OpenWrt等对OpenMP不友好的场景）
+#define MATMUL_PTHREAD
+
+#ifdef MATMUL_PTHREAD
+    #include "matmul_pthread.h"
+#endif
+
 #if defined _WIN32
     #include "win.h"
 #else

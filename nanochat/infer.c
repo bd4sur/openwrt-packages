@@ -543,6 +543,9 @@ void softmax(float* x, int size) {
 }
 
 void matmul(float* xout, float* x, float* w, int n, int d) {
+#ifdef MATMUL_PTHREAD
+    matmul_pthread(xout, x, w, n, d);
+#else
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
@@ -554,6 +557,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
         }
         xout[i] = val;
     }
+#endif
 }
 
 
