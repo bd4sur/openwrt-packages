@@ -949,7 +949,7 @@ int32_t generate(
 
     uint32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
     uint32_t (*on_decoding)(wchar_t*, uint32_t, float),
-    uint32_t (*on_finished)(float, uint32_t)
+    uint32_t (*on_finished)(wchar_t*, uint32_t, float)
 ) {
 
     int32_t flag = 0;
@@ -975,6 +975,8 @@ int32_t generate(
     uint32_t next_token = prompt_tokens[0]; // kick off with the first token in the prompt
     uint32_t pos = 0;     // position in the sequence
 
+    wchar_t *output_text = NULL;
+
     while (pos < max_seq_len) {
         if (t_0 == 0) { t_0 = time_in_ms(); }
 
@@ -992,12 +994,11 @@ int32_t generate(
         }
         else if(is_prefilling == 0) {
             output_ids[num_prompt_tokens + output_count++] = next_token;
-            wchar_t *output_text = decode(tokenizer, output_ids + num_prompt_tokens, output_count);
+            output_text = decode(tokenizer, output_ids + num_prompt_tokens, output_count);
 
             float tps = (pos-1) / (double)(time_in_ms() - t_0) * 1000;
 
             int32_t callback_flag = on_decoding(output_text, pos, tps);
-            free(output_text);
 
             // 外部被动中止
             if (callback_flag > 0) {
@@ -1016,10 +1017,11 @@ int32_t generate(
 
     t_1 = time_in_ms();
     float tps = (pos-1) / (double)(t_1 - t_0) * 1000;
-    on_finished(tps, STATUS_STOPPED);
+    on_finished(output_text, pos, tps);
 
-    free(output_ids);
     free(prompt_tokens);
+    free(output_ids);
+    free(output_text);
 
     return flag;
 }

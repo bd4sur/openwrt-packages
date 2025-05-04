@@ -427,16 +427,16 @@ void render_line(wchar_t *line, uint32_t x, uint32_t y, uint8_t mode) {
     }
 }
 
-
-void render_text(wchar_t *text) {
-    wchar_t *wrapped = (wchar_t *)calloc(1024, sizeof(wchar_t));
-    int char_count = 0;
-    int break_pos[1024];
-    int break_count = 0;
-    int line_x_pos = 0;
+// 返回值：文本折行后的行数（含换行符）
+int32_t render_text(wchar_t *text, int32_t line_shift) {
+    wchar_t wrapped[1024];
+    int32_t char_count = 0;
+    int32_t break_pos[1024];
+    int32_t break_count = 0;
+    int32_t line_x_pos = 0;
     for (char_count = 0; char_count < wcslen(text); char_count++) {
         wchar_t ch = text[char_count];
-        int char_width = (ch < 127) ? ((ch == '\n') ? 0 : 6) : 12;
+        int32_t char_width = (ch < 127) ? ((ch == '\n') ? 0 : 6) : 12;
         if (line_x_pos + char_width >= 128 || ch == '\n') {
             break_pos[break_count] = char_count;
             break_count++;
@@ -446,8 +446,36 @@ void render_text(wchar_t *text) {
         wrapped[char_count] = ch;
     }
     wrapped[char_count] = 0;
+    break_pos[break_count] = char_count; // 最后一个字符视为换行，但不计入break_count
 
-    wchar_t *wrapped_clipped = (break_count >= 5) ? (wrapped + break_pos[break_count - 5]) : wrapped;
+    // 向上卷动 |line_shift| 行，注意line_shift非负。默认为0。
+
+    wchar_t wrapped_clipped[1024];
+
+    if (line_shift < 0) {
+        line_shift = 0;
+    }
+
+    int32_t break_from = 0;
+    int32_t break_to = 0;
+
+    if (break_count >= 5) {
+        if (line_shift < (break_count + 1) - 5) {
+            break_from = break_pos[break_count - 5 - line_shift];
+            break_to = break_pos[break_count - line_shift];
+        }
+        else {
+            break_from = 0;
+            break_to = break_pos[5 - 1];
+        }
+    }
+    else {
+        break_from = 0;
+        break_to = wcslen(wrapped);
+    }
+
+    wcscpy(wrapped_clipped, wrapped + break_from);
+    wrapped_clipped[break_to - break_from] = 0;
 
     int x_pos = 0;
     int y_pos = 0;
@@ -457,7 +485,7 @@ void render_text(wchar_t *text) {
         uint8_t font_height = 12;
         if (current_char == '\n') {
             x_pos = 0;
-            if(i > 0) y_pos += font_height;
+            if(i > 0) y_pos += (font_height + 1);
             continue;
         }
         uint8_t *glyph = get_glyph(current_char, &font_width, &font_height);
@@ -472,4 +500,9 @@ void render_text(wchar_t *text) {
         OLED_ShowChar(x_pos, y_pos, glyph, font_width, font_height, 1);
         x_pos += font_width;
     }
+
+    // free(wrapped);
+    // free(wrapped_clipped);
+
+    return break_count + 1;
 }

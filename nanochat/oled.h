@@ -39,6 +39,9 @@
 #define delayMicroseconds(x) usleep(x)
 #define delay(x) usleep((x)*1000)
 
+#define MIN(x, y) (((x) > (y)) ? (y) : (x))
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+
 void OLED_WriteByte(uint8_t data, uint8_t mode);
 void OLED_Init(void);
 void OLED_Close(void);
@@ -58,6 +61,6 @@ void OLED_DisplayTurn(uint8_t i);
 
 uint8_t *get_glyph(uint32_t utf32, uint8_t *font_width, uint8_t *font_height);
 void render_line(wchar_t *line, uint32_t x, uint32_t y, uint8_t mode);
-void render_text(wchar_t *text);
+int32_t render_text(wchar_t *text, int32_t line_pos);
 
 #endif

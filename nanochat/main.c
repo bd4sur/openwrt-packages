@@ -4,13 +4,14 @@
 #include "keyboard.h"
 #include "infer.h"
 
-#define INPUT_BUFFER_LENGTH (1024)
+#define INPUT_BUFFER_LENGTH  (1024)
+#define OUTPUT_BUFFER_LENGTH (512)
 
 #define IME_MODE_HANZI    (0)
 #define IME_MODE_ALPHABET (1)
 #define IME_MODE_NUMBER   (2)
 
-#define ALPHABET_COUNTDOWN_MAX (20)
+#define ALPHABET_COUNTDOWN_MAX (30)
 
 static Nano_Context ctx;
 
@@ -20,6 +21,7 @@ static char *MODEL_PATH_3 = "/emmc/_model/1-基础模型-99000.bin";
 static char *LORA_PATH_3  = "/emmc/_model/2-插件-猫娘.bin";
 
 static float tps_of_last_session = 0.0f;
+static wchar_t output_of_last_session[OUTPUT_BUFFER_LENGTH];
 
 void load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
     ctx.random_seed = rng_seed;
@@ -35,44 +37,10 @@ void unload_model() {
     free_sampler(ctx.sampler);
 }
 
-uint32_t on_prefilling(wchar_t *prompt, uint32_t pos, uint32_t num_prompt_tokens) {
-    // 按住A键中止推理
-    char key = keyboard_read_key();
-    if (key == 10) {
-        return 1;
-    }
-    render_text(L"Pre-filling...");
-    OLED_DrawLine(0, 60, 128, 60, 1);
-    OLED_DrawLine(0, 63, 128, 63, 1);
-    OLED_DrawLine(127, 60, 127, 63, 1);
-    OLED_DrawLine(0, 61, pos * 128 / (num_prompt_tokens - 2), 61, 1);
-    OLED_DrawLine(0, 62, pos * 128 / (num_prompt_tokens - 2), 62, 1);
-    OLED_Refresh();
-    return 0;
-}
-
-uint32_t on_decoding(wchar_t *output, uint32_t pos, float tps) {
-    // 按住A键中止推理
-    char key = keyboard_read_key();
-    if (key == 10) {
-        return 1;
-    }
-    OLED_SoftClear();
-    render_text(output);
-    OLED_Refresh();
-    return 0;
-}
-
-uint32_t on_finished(float tps, uint32_t status) {
-    tps_of_last_session = tps;
-    printf("TPS = %f\n", tps);
-    return 0;
-}
-
 void show_splash_screen() {
     OLED_SoftClear();
 
-    // render_text(L" \n    Project MARGA!   \n  Powered by Nano LM\n   BD4SUR  2025-04   ");
+    // render_text(L" \n    Project MARGA!   \n  Powered by Nano LM\n   BD4SUR  2025-04   ", 0);
     render_line(L"Project MARGA!", 24, 2, 1);
     render_line(L"完全离线电子鹦鹉", 16, 20, 1);
     render_line(L"自研Nano模型强力驱动", 4, 34, 1);
@@ -101,7 +69,7 @@ void render_input_buffer(uint32_t *input_buffer, uint32_t ime_mode_flag, uint32_
     }
     wcscat(text, input_buffer);
     if (is_show_cursor) wcscat(text, L"_");
-    render_text(text);
+    render_text(text, 0);
     OLED_Refresh();
 }
 
@@ -137,7 +105,7 @@ void render_pinyin_input(uint32_t **candidate_pages, uint32_t pinyin_keys, uint3
     else {
         wcscat(text, L"(无候选字)");
     }
-    render_text(text);
+    render_text(text, 0);
     OLED_Refresh();
 }
 
@@ -178,8 +146,17 @@ void render_symbol_input(uint32_t **candidate_pages, uint32_t current_page, uint
     else {
         wcscat(text, L"(无候选符号)");
     }
-    render_text(text);
+    render_text(text, 0);
     OLED_Refresh();
+}
+
+void render_scroll_bar(int32_t line_num, int32_t current_line) {
+    for (int y = 0; y < 64; y++) {
+        OLED_DrawPoint(127, y, !(y % 3));
+    }
+    uint8_t bar_height = (uint8_t)((5 * 64) / line_num);
+    uint8_t y_0 = (uint8_t)((current_line * 64) / line_num);
+    OLED_DrawLine(127, y_0, 127, y_0 + bar_height, 1);
 }
 
 uint32_t *refresh_input_buffer(uint32_t *input_buffer, int32_t *input_counter) {
@@ -196,6 +173,45 @@ uint32_t *refresh_input_buffer(uint32_t *input_buffer, int32_t *input_counter) {
 }
 
 
+
+uint32_t on_prefilling(wchar_t *prompt, uint32_t pos, uint32_t num_prompt_tokens) {
+    // 按住A键中止推理
+    char key = keyboard_read_key();
+    if (key == 10) {
+        return 1;
+    }
+    render_text(L"Pre-filling...", 0);
+    OLED_DrawLine(0, 60, 128, 60, 1);
+    OLED_DrawLine(0, 63, 128, 63, 1);
+    OLED_DrawLine(127, 60, 127, 63, 1);
+    OLED_DrawLine(0, 61, pos * 128 / (num_prompt_tokens - 2), 61, 1);
+    OLED_DrawLine(0, 62, pos * 128 / (num_prompt_tokens - 2), 62, 1);
+    OLED_Refresh();
+    return 0;
+}
+
+uint32_t on_decoding(wchar_t *output, uint32_t pos, float tps) {
+    // 按住A键中止推理
+    char key = keyboard_read_key();
+    if (key == 10) {
+        return 1;
+    }
+    OLED_SoftClear();
+    int32_t line_num = render_text(output, 0);
+    render_scroll_bar(line_num, line_num - 5);
+    OLED_Refresh();
+    return 0;
+}
+
+uint32_t on_finished(wchar_t *output, uint32_t pos, float tps) {
+    wcscpy(output_of_last_session, output);
+
+    tps_of_last_session = tps;
+    printf("TPS = %f\n", tps);
+    return 0;
+}
+
+
 int main() {
     if(!setlocale(LC_CTYPE, "")) return -1;
 
@@ -208,8 +224,10 @@ int main() {
     ////////////////////////////////////////////////
     // LLM Init
 
-    render_text(L" 正在加载语言模型\n Nano-168M-QA\n 请稍等...");
+    OLED_SoftClear();
+    render_text(L" 正在加载语言模型\n Nano-168M-QA\n 请稍等...", 0);
     OLED_Refresh();
+    usleep(500*1000);
 
     float repetition_penalty = 1.1f;
     float temperature = 1.0f;
@@ -251,6 +269,10 @@ int main() {
     // 全局文字输入缓冲
     uint32_t *input_buffer = (uint32_t *)calloc(INPUT_BUFFER_LENGTH, sizeof(uint32_t)); // 文字输入缓冲区
     int32_t input_counter = 0;
+
+    // 推理结果翻页相关
+    int32_t output_line_num = 0;
+    int32_t output_shift = 0;
 
     // 英文字母输入模式的倒计时
     int32_t alphabet_countdown = -1; // 从ALPHABET_COUNTDOWN_MAX开始，每轮主循环后倒数减1，减到0时清除进度条，减到-1意味着英文字母输入状态结束
@@ -336,8 +358,7 @@ STATE_0:    // 初始状态：等待输入拼音/字母/数字，或者将文字
                 // B键：转到设置
                 else if (key == 11) {
                     OLED_SoftClear();
-                    // render_text(L"Nano语言模型\nProject MARGA!\n \n(c) BD4SUR 2025-04");
-                    render_text(L"选择语言模型：\n\n1. Nano-168M-QA\n2. Nano-56M-QA\n3. Nano-56M-Neko");
+                    render_text(L"选择语言模型：\n\n1. Nano-168M-QA\n2. Nano-56M-QA\n3. Nano-56M-Neko", 0);
                     OLED_Refresh();
 
                     STATE = 4;
@@ -372,7 +393,7 @@ STATE_0:    // 初始状态：等待输入拼音/字母/数字，或者将文字
                 // #键：关于
                 else if (key == 15) {
                     OLED_SoftClear();
-                    render_text(L"Project MARGA!\n基于Nano语言模型的\n端侧AI问答交互\nV2025.5\n(c) BD4SUR 2025年4月");
+                    render_text(L"Project MARGA!\n基于Nano语言模型的\n端侧AI问答交互\nV2025.5\n(c) BD4SUR 2025年4月", 0);
                     OLED_Refresh();
 
                     STATE = 5;
@@ -557,9 +578,9 @@ STATE_4:    // 选择语言模型状态
 
                 if (key == 1) {
                     unload_model();
-                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-168M-QA\n 请稍等..."); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-168M-QA\n 请稍等...", 0); OLED_Refresh();
                     load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
-                    OLED_SoftClear(); render_text(L"加载完成~"); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
                     current_page = 0;
@@ -568,9 +589,9 @@ STATE_4:    // 选择语言模型状态
 
                 else if (key == 2) {
                     unload_model();
-                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-QA\n 请稍等..."); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-QA\n 请稍等...", 0); OLED_Refresh();
                     load_model(MODEL_PATH_2, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
-                    OLED_SoftClear(); render_text(L"加载完成~"); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
                     current_page = 0;
@@ -579,9 +600,9 @@ STATE_4:    // 选择语言模型状态
 
                 else if (key == 3) {
                     unload_model();
-                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-Neko\n 请稍等..."); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-Neko\n 请稍等...", 0); OLED_Refresh();
                     load_model(MODEL_PATH_3, LORA_PATH_3, repetition_penalty, temperature, top_p, top_k, random_seed);
-                    OLED_SoftClear(); render_text(L"加载完成~"); OLED_Refresh();
+                    OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
                     current_page = 0;
@@ -591,7 +612,7 @@ STATE_4:    // 选择语言模型状态
                 // A键：取消操作，回到初始状态
                 else if (key == 10) {
                     OLED_SoftClear();
-                    render_text(L"操作已取消");
+                    render_text(L"操作已取消", 0);
                     OLED_Refresh();
 
                     usleep(1000*1000);
@@ -641,7 +662,7 @@ STATE_10:   // 提交候选字到LLM，开始推理
                         printf("推理中止。\n");
 
                         OLED_SoftClear();
-                        render_text(L"推理中止 QAQ\n\n\n\n按[取消]键返回。");
+                        render_text(L"推理中止 QAQ\n\n\n\n按[取消]键返回。", 0);
                         OLED_Refresh();
                         usleep(1000 * 1000);
 
@@ -649,11 +670,34 @@ STATE_10:   // 提交候选字到LLM，开始推理
                     }
                     else if (flag == LLM_STOPPED_NORMALLY) {
                         printf("推理自然结束。\n");
+
+                        // 计算提示语+生成内容的行数，绘制文本和滚动条
+                        OLED_SoftClear();
+
+                        wchar_t prompt_and_output[2048] = L"Homo:\n";
+                        wcscat(prompt_and_output, input_buffer);
+                        wcscat(prompt_and_output, L"\n--------------------\nNano:\n");
+                        wcscat(prompt_and_output, output_of_last_session);
+                        wchar_t tps_wcstr[50];
+                        swprintf(tps_wcstr, 50, L"\n\n[平均速度%.1f词元/秒]", tps_of_last_session);
+                        wcscat(prompt_and_output, tps_wcstr);
+
+                        wcscpy(output_of_last_session, prompt_and_output);
+                        output_line_num = render_text(output_of_last_session, 0);
+                        render_scroll_bar(output_line_num, output_line_num - 5);
+                        OLED_Refresh();
+
                         STATE = 10;
                     }
                     else {
                         printf("推理过程异常退出。\n");
-                        STATE = 10;
+
+                        OLED_SoftClear();
+                        render_text(L"推理过程异常退出。\n\n\n\n按[取消]键返回。", 0);
+                        OLED_Refresh();
+                        usleep(1000 * 1000);
+
+                        STATE = 0;
                     }
                 }
 
@@ -662,16 +706,50 @@ STATE_10:   // 提交候选字到LLM，开始推理
                     OLED_SoftClear();
                     wchar_t tps_wcstr[1024];
                     swprintf(tps_wcstr, 1024, L"推理结束^_^\n\n平均速度%.1f词元/秒", tps_of_last_session);
-                    render_text(tps_wcstr);
+                    render_text(tps_wcstr, 0);
                     OLED_Refresh();
 
-                    usleep(3000*1000);
+                    usleep(1000*1000);
 
                     input_buffer = refresh_input_buffer(input_buffer, &input_counter);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
 
                     current_page = 0;
                     STATE = 0;
+                }
+
+                // *键：推理结果向上翻一行。如果翻到顶，则回到最后一行。
+                else if (key == 14) {
+                    if (output_shift == (output_line_num - 5)) { // 卷到顶的卷动量
+                        output_shift = 0;
+                    }
+                    else {
+                        output_shift++;
+                    }
+
+                    OLED_SoftClear();
+                    render_text(output_of_last_session, output_shift);
+                    render_scroll_bar(output_line_num, output_line_num - output_shift - 5);
+                    OLED_Refresh();
+
+                    STATE = 10;
+                }
+
+                // #键：推理结果向下翻一行。如果翻到底，则回到第一行。
+                else if (key == 15) {
+                    if (output_shift == 0) {
+                        output_shift = (output_line_num - 5); // 卷到顶的卷动量
+                    }
+                    else {
+                        output_shift--;
+                    }
+
+                    OLED_SoftClear();
+                    render_text(output_of_last_session, output_shift);
+                    render_scroll_bar(output_line_num, output_line_num - output_shift - 5);
+                    OLED_Refresh();
+
+                    STATE = 10;
                 }
 
                 break;

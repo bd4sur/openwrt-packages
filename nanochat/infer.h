@@ -195,7 +195,7 @@ int32_t generate(
     unsigned int max_seq_len,
     uint32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
     uint32_t (*on_decoding)(wchar_t*, uint32_t, float),
-    uint32_t (*on_finished)(float, uint32_t)
+    uint32_t (*on_finished)(wchar_t*, uint32_t, float)
 );
 
 void free_lora(LLM *llm, LoRA *lora);
