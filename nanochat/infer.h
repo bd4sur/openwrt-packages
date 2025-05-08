@@ -176,7 +176,20 @@ typedef struct {
     int random_seed;
 } Nano_Context;
 
-
+typedef struct {
+    wchar_t *prompt;
+    uint32_t num_prompt_tokens;
+    uint32_t max_seq_len;
+    uint32_t *output_ids;
+    uint32_t output_count;
+    wchar_t *output_text;
+    uint32_t next_token;
+    uint32_t pos;
+    int32_t is_prefilling;
+    long t_0;
+    long t_1;
+    float tps;
+} Nano_Session;
 
 void load_llm(LLM *llm, Tokenizer *tk, char *model_path);
 Sampler *build_sampler(int vocab_size, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed);
@@ -186,6 +199,10 @@ unsigned int *encode(Tokenizer *t, wchar_t *text, unsigned int *n_tokens_ptr);
 wchar_t *decode(Tokenizer *t, unsigned int *ids, unsigned int len);
 
 wchar_t *apply_template_to_str(char *str, unsigned int max_seq_len);
+
+Nano_Session *llm_session_init(Nano_Context ctx, wchar_t *prompt, unsigned int max_seq_len);
+
+int32_t llm_session_step(Nano_Context ctx, Nano_Session *session);
 
 unsigned int generate_next_token(Nano_Context ctx, unsigned int *output_ids, unsigned int pos, int is_prefilling);
 

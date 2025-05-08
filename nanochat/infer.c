@@ -940,6 +940,47 @@ long time_in_ms() {
     return time.tv_sec * 1000 + time.tv_nsec / 1000000;
 }
 
+
+Nano_Session *llm_session_init(Nano_Context ctx, wchar_t *prompt, unsigned int max_seq_len) {
+    Nano_Session *session = (Nano_Session *)calloc(1, sizeof(Nano_Session));
+
+    Tokenizer *tokenizer = ctx.tokenizer;
+
+    if (prompt == NULL) {
+        wcscpy(session->prompt, L"");
+    }
+    else {
+        wcscpy(session->prompt, prompt);
+    }
+
+    session->t_0 = 0;
+    session->t_1 = 0;
+    session->tps = 0.0f;
+
+    session->max_seq_len = max_seq_len;
+
+    session->output_ids = (uint32_t *)calloc(max_seq_len + 1, sizeof(uint32_t));
+    session->output_count = 0;
+
+    session->num_prompt_tokens = 0;
+    uint32_t *prompt_tokens = encode(tokenizer, session->prompt, &(session->num_prompt_tokens));
+
+    for(int i = 0; i < session->num_prompt_tokens; i++) {
+        session->output_ids[i] = prompt_tokens[i];
+    }
+
+    session->next_token = prompt_tokens[0]; // kick off with the first token in the prompt
+    session->pos = 0;     // position in the sequence
+
+    session->output_text = NULL;
+
+    return session;
+}
+
+
+
+
+
 int32_t generate(
     Nano_Context ctx,
 

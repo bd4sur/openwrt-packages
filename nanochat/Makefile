@@ -8,6 +8,9 @@ all: $(APP_BINARY)
 $(APP_BINARY): main.c oled.c avltree.c hashmap.c trie.c matmul_pthread.c infer.c
 	$(CC) $(CCFLAGS) $^ -o $@ $(LDFLAGS)
 
+llm: main_llm.c hashmap.c trie.c matmul_pthread.c infer.c
+	$(CC) $(CCFLAGS) $^ -o $@ $(LDFLAGS)
+
 install:
 	chmod +x $(APP_BINARY)
 	cp -pR $(APP_BINARY) /usr/bin/
@@ -15,3 +18,4 @@ install:
 
 clean:
 	rm -f $(APP_BINARY)
+	rm -f llm
