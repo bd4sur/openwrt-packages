@@ -39,6 +39,6 @@ typedef struct {
 
 
 void matmul_pthread(float* xout, float* x, float* w, int n, int d);
-void global_cleanup();
+void matmul_pthread_cleanup();
 
 #endif

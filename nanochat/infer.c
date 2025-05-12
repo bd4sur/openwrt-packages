@@ -1,6 +1,43 @@
+//
+// Nano Language Model - Inference Engine written in C
+//
+//   BD4SUR 2024-10 2024-05
+//
+//   Forked from: https://github.com/karpathy/llama2.c
+//
+
+
 #include "infer.h"
 
-// 分词器和词元编解码
+
+// ===============================================================================
+// 辅助函数
+// ===============================================================================
+
+unsigned int random_u32(unsigned long long *state) {
+    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    return (*state * 0x2545F4914F6CDD1Dull) >> 32;
+}
+
+// random float32 in [0,1)
+float random_f32(unsigned long long *state) {
+    return (random_u32(state) >> 8) / 16777216.0f;
+}
+
+// return time in milliseconds, for benchmarking the model speed
+long time_in_ms() {
+    struct timespec time;
+    clock_gettime(CLOCK_REALTIME, &time);
+    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
+}
+
+
+// ===============================================================================
+// 朴素分词器和词元编解码（用于自研Nano模型）
+// ===============================================================================
 
 void free_tokenizer(Tokenizer *tk) {
     for(uint32_t i = 0; i < tk->vocab_size; i++) {
@@ -45,6 +82,18 @@ uint32_t *encode(Tokenizer *t, wchar_t *text, uint32_t *n_tokens_ptr) {
     return output_ids;
 }
 
+// 构建提示模板
+wchar_t *apply_chat_template(wchar_t *system_prompt, wchar_t *history, wchar_t *user_input) {
+    wchar_t *prompt = (wchar_t*)calloc(MAX_PROMPT_BUFFER_LENGTH + 1, sizeof(wchar_t));
+    prompt[0] = 0;
+    if (system_prompt != NULL) wcscat(prompt, system_prompt);
+    if (history != NULL) wcscat(prompt, history);
+    wcscat(prompt, L"<|instruct_mark|>");
+    wcscat(prompt, user_input);
+    wcscat(prompt, L"<|response_mark|>");
+    return prompt;
+}
+
 
 // ===============================================================================
 // 模型文件解析·内存管理
@@ -65,25 +114,6 @@ void malloc_fwd_buffer(FwdBuffer *s, LLM_Config *llm_cfg) {
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q ||
         !s->k_cache || !s->v_cache || !s->att || !s->logits) {
-        fprintf(stderr, "malloc failed!\n");
-        exit(EXIT_FAILURE);
-    }
-}
-
-
-void malloc_fwd_buffer_with_lora(FwdBuffer *s, LLM_Config *llm_cfg, LoRA_Config *lora_cfg) {
-    uint32_t kv_dim = (llm_cfg->n_embd * llm_cfg->n_kv_head) / llm_cfg->n_head;
-    s->q0 = calloc(lora_cfg->lora_rank, sizeof(float));
-    s->k0 = calloc(lora_cfg->lora_rank, sizeof(float));
-    s->v0 = calloc(lora_cfg->lora_rank, sizeof(float));
-    s->o0 = calloc(lora_cfg->lora_rank, sizeof(float));
-    s->q1 = calloc(llm_cfg->n_embd, sizeof(float));
-    s->k1 = calloc(kv_dim, sizeof(float));
-    s->v1 = calloc(kv_dim, sizeof(float));
-    s->o1 = calloc(llm_cfg->n_embd, sizeof(float));
-    // ensure all mallocs went fine
-    if (!s->q0 || !s->k0 || !s->v0 || !s->o0 ||
-        !s->q1 || !s->k1 || !s->v1 || !s->o1 ) {
         fprintf(stderr, "malloc failed!\n");
         exit(EXIT_FAILURE);
     }
@@ -126,125 +156,6 @@ void memory_map_params(LLM_Param *w, LLM_Config* p, float* ptr, int shared_weigh
     w->token_classifier = shared_weights ? w->token_embedding : ptr;
 }
 
-#ifdef NANO_USE_MMAP
-void read_model_file_mmap(char* model_path, LLM *llm, Tokenizer *tk) {
-
-    LLM_Config *config = &(llm->config);
-    LLM_Param *params = &(llm->params);
-    int *fd = &(llm->fd);
-    float** data = &(llm->data);
-    ssize_t* file_size = &(llm->file_size);
-
-    FILE *file = fopen(model_path, "rb");
-    if (!file) { fprintf(stderr, "Couldn't open file %s\n", model_path); exit(EXIT_FAILURE); }
-
-    // 读取文件头
-    const uint32_t header_byte_length = 256;
-    const uint32_t header_uint_length = header_byte_length / sizeof(uint32_t);
-    uint32_t *header = (uint32_t *)calloc(header_uint_length, sizeof(uint32_t));
-
-    if(fread(header, sizeof(uint32_t), header_uint_length, file) != header_uint_length) { exit(EXIT_FAILURE); }
-
-    uint32_t offset = 0;
-
-    uint32_t magic_number_0 = header[offset]; offset++;
-    uint32_t magic_number_1 = header[offset]; offset++;
-
-    uint32_t major_version  = header[offset]; offset++;
-    uint32_t minor_version  = header[offset]; offset++;
-
-    uint32_t model_type     = header[offset]; offset++;
-    uint32_t config_length  = header[offset]; offset++;
-
-    config->block_size      = header[offset]; offset++;
-    config->vocab_size      = header[offset]; offset++;
-    config->n_layer         = header[offset]; offset++;
-    config->n_embd          = header[offset]; offset++;
-    config->n_head          = header[offset]; offset++;
-    config->n_kv_head       = header[offset]; offset++;
-    config->n_hidden        = header[offset]; offset++;
-    config->is_shared_classifier = header[offset]; offset++;
-
-    // 读取参数部分的长度字段
-    // unsigned long long param_num = 0;
-    // if(fread(&param_num, sizeof(unsigned long long), 1, file) != 1) { exit(EXIT_FAILURE); }
-
-    // figure out the file size
-    fseek(file, 0, SEEK_END); // move file pointer to end of file
-    *file_size = ftell(file); // get the file size, in bytes
-    fclose(file);
-
-    // memory map the Transformer parameters into the data pointer
-    *fd = open(model_path, O_RDONLY); // open in read only mode
-    if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-
-    // 解析词表，同时构建trie树和hashmap
-
-    uint32_t *tokenzier_ptr = (uint32_t *)(*data) + (header_byte_length / sizeof(uint32_t));
-    uint32_t tokenizer_field_bytes = *tokenzier_ptr;
-    uint32_t *vocab_ptr = tokenzier_ptr + 1;
-
-    uint32_t byte_count = 0;
-    uint32_t char_count = 0;
-
-    tk->vocab_size = *vocab_ptr; vocab_ptr++;
-    // printf("Vocab size = %d\n", tk->vocab_size);
-
-    tk->token_list        = (wchar_t **)calloc(tk->vocab_size, sizeof(wchar_t *));
-    tk->unicode_charset   = (wchar_t  *)calloc(tk->vocab_size, sizeof(wchar_t));
-    tk->unicode_to_id_map = new_map(tk->vocab_size);
-    tk->token_to_id_map   = new_map(tk->vocab_size);
-    tk->vocab_trie        = new_trie(tk->vocab_size, 0);
-
-    while(byte_count < tokenizer_field_bytes - 8) { // 不含tokenizer_field_bytes和vocab_size字段的8个字节
-        uint32_t token_header = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
-        uint32_t token_id     = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
-
-        // NOTE Little endian 小端序！如果按照uint32解析，顺序是 MSB(reserved_1 reserved_0 is_special token_length)LSB
-        // uint32_t reserved_1   = (token_header & 0xff000000) >> 24;
-        // uint32_t reserved_0   = (token_header & 0x00ff0000) >> 16;
-        // uint32_t is_special   = (token_header & 0x0000ff00) >> 8;
-        uint32_t token_length = (token_header & 0x000000ff);
-
-        wchar_t *token = (wchar_t *)calloc(token_length+1, sizeof(wchar_t));
-        // 如果是单个字符，则加入unicode_charset
-        if(token_length == 1) {
-            tk->unicode_charset[char_count] = *vocab_ptr;
-            map_set(tk->unicode_to_id_map, *vocab_ptr, token_id);
-            char_count++;
-        }
-        for(uint32_t i = 0; i < token_length; i++) {
-            token[i] = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
-        }
-        token[token_length] = 0;
-        tk->token_list[token_id] = token;
-    }
-
-    // 构建trie树
-    for(uint32_t i = 0; i < tk->vocab_size; i++) {
-        wchar_t *utoken = tk->token_list[i];
-        uint32_t len = wcslen(utoken);
-        if(len > 1) {
-            uint32_t *ids = string_to_ids(tk->unicode_to_id_map, utoken);
-            add_token(tk->vocab_trie, ids, len, i);
-        }
-    }
-
-
-    // 解析模型参数
-
-    float* param_ptr = (float*)(tokenzier_ptr + tokenizer_field_bytes/sizeof(uint32_t));
-    memory_map_params(params, config, param_ptr, config->is_shared_classifier);
-
-}
-#endif
-
-
-
-
 
 void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
 
@@ -253,7 +164,7 @@ void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
 
     // 读取文件头
     const uint32_t header_byte_length = 256;
-    // const uint32_t header_uint_length = header_byte_length / sizeof(uint32_t);
+
     uint32_t *header = (uint32_t *)buffer;
 
     uint32_t offset = 0;
@@ -286,7 +197,6 @@ void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
     uint32_t char_count = 0;
 
     tk->vocab_size = *vocab_ptr; vocab_ptr++;
-    // printf("Vocab size = %d\n", tk->vocab_size);
 
     tk->token_list        = (wchar_t **)calloc(tk->vocab_size, sizeof(wchar_t *));
     tk->unicode_charset   = (wchar_t  *)calloc(tk->vocab_size, sizeof(wchar_t));
@@ -335,8 +245,85 @@ void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
 }
 
 
+void load_llm_from_buffer(LLM *llm, Tokenizer *tk, char *buffer) {
+    parse_model_file(buffer, llm, tk);
+    malloc_fwd_buffer(&llm->state, &llm->config);
+}
 
 
+void load_llm(LLM *llm, Tokenizer *tk, char *model_path) {
+    // 获得文件长度
+    FILE *_file = fopen(model_path, "rb");
+    if (!_file) { fprintf(stderr, "Couldn't open file %s\n", model_path); exit(EXIT_FAILURE); }
+    fseek(_file, 0, SEEK_END);
+    llm->file_size = ftell(_file);
+    fclose(_file);
+
+#ifdef NANO_USE_MMAP
+
+    // 将文件mmap到虚拟内存
+    int fd = open(model_path, O_RDONLY);
+    if (fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+    char *buffer = mmap(NULL, llm->file_size, PROT_READ, (MAP_PRIVATE | MAP_POPULATE), fd, 0);
+    if (buffer == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
+
+    llm->fd = fd;
+    llm->buffer = buffer;
+
+    load_llm_from_buffer(llm, tk, buffer);
+
+#else
+
+    FILE *file = fopen(model_path, "rb");
+    if (!file) { fprintf(stderr, "Couldn't open model file %s\n", model_path); exit(EXIT_FAILURE); }
+    char *buffer = (char *)malloc(llm->file_size + 1);
+    if (!buffer)  { fprintf(stderr, "malloc failed.\n"); exit(EXIT_FAILURE); }
+    if(fread(buffer, sizeof(char), llm->file_size, file) != llm->file_size) { exit(EXIT_FAILURE); }
+    llm->buffer = buffer;
+
+    load_llm_from_buffer(llm, tk, buffer);
+
+    fclose(file);
+#endif
+}
+
+
+void free_llm(LLM* llm, Tokenizer *tk) {
+#ifdef NANO_USE_MMAP
+    // close the memory mapping
+    if (llm->buffer != MAP_FAILED) { munmap(llm->buffer, llm->file_size); }
+    if (llm->fd != -1) { close(llm->fd); }
+#else
+    free(llm->buffer);
+#endif
+    free_tokenizer(tk);
+    free_fwd_buffer(&llm->state);
+}
+
+
+
+// ===============================================================================
+// LoRA插件文件解析·LoRA相关内存管理
+// ===============================================================================
+
+
+void malloc_fwd_buffer_with_lora(FwdBuffer *s, LLM_Config *llm_cfg, LoRA_Config *lora_cfg) {
+    uint32_t kv_dim = (llm_cfg->n_embd * llm_cfg->n_kv_head) / llm_cfg->n_head;
+    s->q0 = calloc(lora_cfg->lora_rank, sizeof(float));
+    s->k0 = calloc(lora_cfg->lora_rank, sizeof(float));
+    s->v0 = calloc(lora_cfg->lora_rank, sizeof(float));
+    s->o0 = calloc(lora_cfg->lora_rank, sizeof(float));
+    s->q1 = calloc(llm_cfg->n_embd, sizeof(float));
+    s->k1 = calloc(kv_dim, sizeof(float));
+    s->v1 = calloc(kv_dim, sizeof(float));
+    s->o1 = calloc(llm_cfg->n_embd, sizeof(float));
+    // ensure all mallocs went fine
+    if (!s->q0 || !s->k0 || !s->v0 || !s->o0 ||
+        !s->q1 || !s->k1 || !s->v1 || !s->o1 ) {
+        fprintf(stderr, "malloc failed!\n");
+        exit(EXIT_FAILURE);
+    }
+}
 
 
 void parse_lora_file(char* buffer, LoRA *lora, LLM *llm) {
@@ -403,51 +390,6 @@ void parse_lora_file(char* buffer, LoRA *lora, LLM *llm) {
     lora_params->wv_lora_b = lora_param_ptr; lora_param_ptr += wv_lora_b_len;
     lora_params->wo_lora_a = lora_param_ptr; lora_param_ptr += wo_lora_a_len;
     lora_params->wo_lora_b = lora_param_ptr; lora_param_ptr += wo_lora_b_len;
-}
-
-void load_llm(LLM *llm, Tokenizer *tk, char *model_path) {
-
-#ifdef NANO_USE_MMAP
-    read_model_file_mmap(model_path, llm, tk);
-#else
-    FILE *file = fopen(model_path, "rb");
-    if (!file) { fprintf(stderr, "Couldn't open model file %s\n", model_path); exit(EXIT_FAILURE); }
-
-    // 获取文件大小
-    fseek(file, 0, SEEK_END);
-    long long unsigned int file_size = ftell(file);
-    rewind(file);
-
-    char *buffer = (char *)malloc(file_size + 1);
-    if (!buffer)  { fprintf(stderr, "malloc failed.\n"); exit(EXIT_FAILURE); }
-
-    if(fread(buffer, sizeof(char), file_size, file) != file_size) { exit(EXIT_FAILURE); }
-
-    llm->data = (float*)buffer;
-
-    parse_model_file(buffer, llm, tk);
-
-    fclose(file);
-#endif
-
-    malloc_fwd_buffer(&llm->state, &llm->config);
-}
-
-void load_llm_from_buffer(LLM *llm, Tokenizer *tk, char *buffer) {
-    parse_model_file(buffer, llm, tk);
-    malloc_fwd_buffer(&llm->state, &llm->config);
-}
-
-void free_llm(LLM* llm, Tokenizer *tk) {
-#ifdef NANO_USE_MMAP
-    // close the memory mapping
-    if (t->data != MAP_FAILED) { munmap(t->data, t->file_size); }
-    if (t->fd != -1) { close(t->fd); }
-#else
-    free(llm->data);
-#endif
-    free_tokenizer(tk);
-    free_fwd_buffer(&llm->state);
 }
 
 LoRA *load_lora(LLM *llm, char *lora_path) {
@@ -542,12 +484,11 @@ void softmax(float* x, int size) {
     }
 }
 
+// W (d,n) @ x (n,) -> xout (d,)
 void matmul(float* xout, float* x, float* w, int n, int d) {
 #ifdef MATMUL_PTHREAD
     matmul_pthread(xout, x, w, n, d);
 #else
-    // W (d,n) @ x (n,) -> xout (d,)
-    // by far the most amount of time is spent inside this little function
     int i;
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++) {
@@ -564,7 +505,6 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 
 float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
 
-    // a few convenience variables
     LLM_Config *cfg = &llm->config;
     LLM_Param *w = &llm->params;
     FwdBuffer *s = &llm->state;
@@ -601,9 +541,9 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
         rmsnorm(s->xb, x, w->rms_norm_attn + l*n_embd, n_embd);
 
         // key and value point to the kv cache
-        int loff = l * cfg->block_size * kv_dim; // kv cache layer offset for convenience
-        s->k = s->k_cache + loff + pos * kv_dim;
-        s->v = s->v_cache + loff + pos * kv_dim;
+        int layer_offset = l * cfg->block_size * kv_dim;
+        s->k = s->k_cache + layer_offset + pos * kv_dim;
+        s->v = s->v_cache + layer_offset + pos * kv_dim;
 
         // qkv matmuls for this position
         matmul(s->q, s->xb, w->wq + l*n_embd*n_embd, n_embd, n_embd);
@@ -682,7 +622,7 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
             // iterate over all timesteps, including the current one
             for (int t = 0; t <= pos; t++) {
                 // get the key vector for this head and at this timestep
-                float* k = s->k_cache + loff + t * kv_dim + (h / kv_mul) * head_dim;
+                float* k = s->k_cache + layer_offset + t * kv_dim + (h / kv_mul) * head_dim;
                 // calculate the attention score as the dot product of q and k
                 float score = 0.0f;
                 for (int i = 0; i < head_dim; i++) {
@@ -701,7 +641,7 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
             memset(xb, 0, head_dim * sizeof(float));
             for (int t = 0; t <= pos; t++) {
                 // get the value vector for this head and at this timestep
-                float* v = s->v_cache + loff + t * kv_dim + (h / kv_mul) * head_dim;
+                float* v = s->v_cache + layer_offset + t * kv_dim + (h / kv_mul) * head_dim;
                 // get the attention weight for this timestep
                 float a = att[t];
                 // accumulate the weighted value into xb
@@ -856,32 +796,17 @@ void free_sampler(Sampler* sampler) {
     free(sampler->probindex);
 }
 
-unsigned int random_u32(unsigned long long *state) {
-    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
-    *state ^= *state >> 12;
-    *state ^= *state << 25;
-    *state ^= *state >> 27;
-    return (*state * 0x2545F4914F6CDD1Dull) >> 32;
-}
-float random_f32(unsigned long long *state) { // random float32 in [0,1)
-    return (random_u32(state) >> 8) / 16777216.0f;
-}
 
 
 // ===============================================================================
 // 自回归文本生成
 // ===============================================================================
 
-uint32_t generate_next_token(
-    Nano_Context ctx,
-    uint32_t *output_ids,
-    uint32_t pos,
-    int is_prefilling
-) {
+uint32_t generate_next_token(Nano_Context *ctx, uint32_t *output_ids, uint32_t pos, int is_prefilling) {
 
-    LLM *llm = ctx.llm;
-    LoRA *lora = ctx.lora;
-    Sampler *sampler = ctx.sampler;
+    LLM *llm = ctx->llm;
+    LoRA *lora = ctx->lora;
+    Sampler *sampler = ctx->sampler;
 
     uint32_t next_token = output_ids[pos];
 
@@ -933,19 +858,11 @@ uint32_t generate_next_token(
 }
 
 
-long time_in_ms() {
-    // return time in milliseconds, for benchmarking the model speed
-    struct timespec time;
-    clock_gettime(CLOCK_REALTIME, &time);
-    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
-}
-
-
-Nano_Session *llm_session_init(Nano_Context ctx, wchar_t *prompt, unsigned int max_seq_len) {
+Nano_Session *llm_session_init(Nano_Context *ctx, wchar_t *prompt, unsigned int max_seq_len) {
     Nano_Session *session = (Nano_Session *)calloc(1, sizeof(Nano_Session));
+    Tokenizer *tokenizer = ctx->tokenizer;
 
-    Tokenizer *tokenizer = ctx.tokenizer;
-
+    session->prompt = (wchar_t *)calloc(MAX_PROMPT_BUFFER_LENGTH + 1, sizeof(wchar_t));
     if (prompt == NULL) {
         wcscpy(session->prompt, L"");
     }
@@ -972,30 +889,112 @@ Nano_Session *llm_session_init(Nano_Context ctx, wchar_t *prompt, unsigned int m
     session->next_token = prompt_tokens[0]; // kick off with the first token in the prompt
     session->pos = 0;     // position in the sequence
 
+    session->is_prefilling = 0;
+
     session->output_text = NULL;
 
     return session;
 }
 
 
+int32_t llm_session_step(Nano_Context *ctx, Nano_Session *session) {
+    Tokenizer *tokenizer = ctx->tokenizer;
+    if (session->pos < session->max_seq_len) {
+        if (session->t_0 == 0) { session->t_0 = time_in_ms(); }
+
+        session->is_prefilling = (session->pos < session->num_prompt_tokens - 1) ? 1 : 0;
+
+        session->next_token = generate_next_token(ctx, session->output_ids, session->pos, session->is_prefilling);
+
+        if (session->is_prefilling == 0) {
+            session->output_ids[session->num_prompt_tokens + (session->output_count)++] = session->next_token;
+            session->output_text = decode(tokenizer, session->output_ids + session->num_prompt_tokens, session->output_count);
+        }
+
+        session->pos++;
+
+        if (session->next_token == 0 || session->next_token == 3) {
+            return LLM_STOPPED_NORMALLY; // 遇到结束符号，主动结束
+        }
+        else {
+            return (session->is_prefilling == 1) ? LLM_RUNNING_IN_PREFILLING : LLM_RUNNING_IN_DECODING;
+        }
+    }
+    else {
+        return LLM_STOPPED_WITH_ERROR;
+    }
+}
+
+
+void llm_session_free(Nano_Session *session) {
+    if(session->prompt)      free(session->prompt);
+    if(session->output_ids)  free(session->output_ids);
+    if(session->output_text) free(session->output_text);
+    if(session)              free(session);
+}
 
 
 
-int32_t generate(
-    Nano_Context ctx,
 
+int32_t generate_sync(
+    Nano_Context *ctx,
     wchar_t *prompt,
-
     uint32_t max_seq_len,
+    int32_t (*on_prefilling)(Nano_Session*),
+    int32_t (*on_decoding)(Nano_Session*),
+    int32_t (*on_finished)(Nano_Session*)
+) {
+    Nano_Session *session = llm_session_init(ctx, prompt, max_seq_len);
+    int32_t status = 0;
+    while (1) {
+        status = llm_session_step(ctx, session);
+        session->tps = (session->pos - 1) / (double)(time_in_ms() - session->t_0) * 1000;
+        if (status == LLM_RUNNING_IN_PREFILLING) {
+            int32_t callback_flag = on_prefilling(session);
+            // 外部被动中止
+            if (callback_flag == LLM_STOPPED_IN_PREFILLING) {
+                status = callback_flag;
+                break;
+            }
+        }
+        else if (status == LLM_RUNNING_IN_DECODING) {
+            int32_t callback_flag = on_decoding(session);
+            // 外部被动中止
+            if (callback_flag == LLM_STOPPED_IN_DECODING) {
+                status = callback_flag;
+                break;
+            }
+        }
+        else if (status == LLM_STOPPED_NORMALLY) {
+            session->t_1 = time_in_ms();
+            session->tps = (session->pos - 1) / (double)(session->t_1 - session->t_0) * 1000;
+            status = on_finished(session);
+            break;
+        }
+        else {
+            status = LLM_STOPPED_WITH_ERROR;
+            break;
+        }
+    }
+    llm_session_free(session);
+    return status;
+}
 
-    uint32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
-    uint32_t (*on_decoding)(wchar_t*, uint32_t, float),
-    uint32_t (*on_finished)(wchar_t*, uint32_t, float)
+
+
+// 弃用，被generate_sync取代
+int32_t generate(
+    Nano_Context *ctx,
+    wchar_t *prompt,
+    uint32_t max_seq_len,
+    int32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
+    int32_t (*on_decoding)(wchar_t*, uint32_t, float),
+    int32_t (*on_finished)(wchar_t*, uint32_t, float)
 ) {
 
     int32_t flag = 0;
 
-    Tokenizer *tokenizer = ctx.tokenizer;
+    Tokenizer *tokenizer = ctx->tokenizer;
 
     wchar_t *empty_prompt = L"";
     if (prompt == NULL) { prompt = empty_prompt; }
@@ -1067,24 +1066,4 @@ int32_t generate(
     return flag;
 }
 
-
-wchar_t *apply_template_to_str(char *str, uint32_t max_seq_len) {
-    wchar_t *winput = (wchar_t *)calloc(max_seq_len, sizeof(wchar_t));
-    uint32_t plen = mbstowcs(winput, str, max_seq_len);
-    wchar_t *prompt_template = L"<|instruct_mark|><|response_mark|>";
-    wchar_t *wprompt = (wchar_t *)calloc(plen + 35, sizeof(wchar_t));
-    for(uint32_t i = 0; i < plen + 35; i++) {
-        if(i >= 0 && i < 17) {
-            wprompt[i] = prompt_template[i];
-        }
-        else if(i >= 17 && i < plen+17) {
-            wprompt[i] = winput[i-17];
-        }
-        else if(i >= plen+17) {
-            wprompt[i] = prompt_template[i - plen];
-        }
-    }
-    free(winput);
-    return wprompt;
-}
 

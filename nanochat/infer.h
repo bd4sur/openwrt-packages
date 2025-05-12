@@ -1,3 +1,12 @@
+//
+// Nano Language Model - Inference Engine written in C
+//
+//   BD4SUR 2024-10 2024-05
+//
+//   Forked from: https://github.com/karpathy/llama2.c
+//
+
+
 #ifndef __NANO_INFER_H__
 #define __NANO_INFER_H__
 
@@ -35,15 +44,16 @@
 
 #define uint32_t unsigned int
 
-#define STATUS_PREFILLING (11)
-#define STATUS_DECODING   (12)
-#define STATUS_STOPPED    (21)
 #define MAX_TOKEN_LENGTH  (17) // NOTE 虽然可以扫描词表得到该值，但是考虑到性能，设置为固定值（对于16384词表而言，至少17）
 
+#define LLM_RUNNING_IN_PREFILLING (11)
+#define LLM_RUNNING_IN_DECODING   (12)
 #define LLM_STOPPED_WITH_ERROR    (-1)
-#define LLM_STOPPED_NORMALLY      (0)
-#define LLM_STOPPED_IN_PREFILLING (1)
-#define LLM_STOPPED_IN_DECODING   (2)
+#define LLM_STOPPED_NORMALLY      (20)
+#define LLM_STOPPED_IN_PREFILLING (21)
+#define LLM_STOPPED_IN_DECODING   (22)
+
+#define MAX_PROMPT_BUFFER_LENGTH  (2048)
 
 // ===============================================================================
 // 数据结构定义
@@ -112,8 +122,8 @@ typedef struct {
     FwdBuffer state;
     // some more state needed to properly clean up the memory mapping (sigh)
     int fd;            // file descriptor for memory mapping
-    float *data;       // memory mapped data pointer
-    ssize_t file_size; // size of the checkpoint file in bytes
+    char *buffer;       // memory mapped data pointer
+    size_t file_size; // size of the checkpoint file in bytes
 } LLM;
 
 typedef struct {
@@ -192,27 +202,35 @@ typedef struct {
 } Nano_Session;
 
 void load_llm(LLM *llm, Tokenizer *tk, char *model_path);
-Sampler *build_sampler(int vocab_size, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed);
+Sampler *build_sampler(int vocab_size, float repetition_penalty, float temperature, float top_p, uint32_t top_k, unsigned long long rng_seed);
 LoRA *load_lora(LLM *llm, char *lora_path);
 
-unsigned int *encode(Tokenizer *t, wchar_t *text, unsigned int *n_tokens_ptr);
-wchar_t *decode(Tokenizer *t, unsigned int *ids, unsigned int len);
+uint32_t *encode(Tokenizer *t, wchar_t *text, uint32_t *n_tokens_ptr);
+wchar_t *decode(Tokenizer *t, uint32_t *ids, uint32_t len);
+wchar_t *apply_chat_template(wchar_t *system_prompt, wchar_t *history, wchar_t *user_input);
 
-wchar_t *apply_template_to_str(char *str, unsigned int max_seq_len);
+uint32_t generate_next_token(Nano_Context *ctx, uint32_t *output_ids, uint32_t pos, int is_prefilling);
 
-Nano_Session *llm_session_init(Nano_Context ctx, wchar_t *prompt, unsigned int max_seq_len);
+Nano_Session *llm_session_init(Nano_Context *ctx, wchar_t *prompt, uint32_t max_seq_len);
+int32_t llm_session_step(Nano_Context *ctx, Nano_Session *session);
+void llm_session_free(Nano_Session *session);
 
-int32_t llm_session_step(Nano_Context ctx, Nano_Session *session);
-
-unsigned int generate_next_token(Nano_Context ctx, unsigned int *output_ids, unsigned int pos, int is_prefilling);
+int32_t generate_sync(
+    Nano_Context *ctx,
+    wchar_t *prompt,
+    uint32_t max_seq_len,
+    int32_t (*on_prefilling)(Nano_Session*),
+    int32_t (*on_decoding)(Nano_Session*),
+    int32_t (*on_finished)(Nano_Session*)
+);
 
 int32_t generate(
-    Nano_Context ctx,
+    Nano_Context *ctx,
     wchar_t *prompt,
-    unsigned int max_seq_len,
-    uint32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
-    uint32_t (*on_decoding)(wchar_t*, uint32_t, float),
-    uint32_t (*on_finished)(wchar_t*, uint32_t, float)
+    uint32_t max_seq_len,
+    int32_t (*on_prefilling)(wchar_t*, uint32_t, uint32_t),
+    int32_t (*on_decoding)(wchar_t*, uint32_t, float),
+    int32_t (*on_finished)(wchar_t*, uint32_t, float)
 );
 
 void free_lora(LLM *llm, LoRA *lora);

@@ -2,39 +2,41 @@
 
 #define OUTPUT_BUFFER_LENGTH (512)
 
-static Nano_Context ctx;
+static Nano_Context *g_llm_ctx;
 
 static char *MODEL_PATH_1 = "/emmc/_model/nano_168m_625000_sft_947000.bin";
 
-void load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
-    ctx.random_seed = rng_seed;
-    ctx.llm = (LLM *)calloc(1, (sizeof(LLM)));
-    ctx.tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
-    load_llm(ctx.llm, ctx.tokenizer, model_path);
-    ctx.sampler = build_sampler(ctx.llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx.random_seed);
-    ctx.lora = (lora_path) ? load_lora(ctx.llm, lora_path) : NULL;
+Nano_Context *load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
+    Nano_Context *ctx = (Nano_Context*)calloc(1, sizeof(Nano_Context));
+    ctx->random_seed = rng_seed;
+    ctx->llm = (LLM *)calloc(1, (sizeof(LLM)));
+    ctx->tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
+    load_llm(ctx->llm, ctx->tokenizer, model_path);
+    ctx->sampler = build_sampler(ctx->llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx->random_seed);
+    ctx->lora = (lora_path) ? load_lora(ctx->llm, lora_path) : NULL;
+    return ctx;
 }
 
-void unload_model() {
-    free_llm(ctx.llm, ctx.tokenizer);
-    free_sampler(ctx.sampler);
+void unload_model(Nano_Context *ctx) {
+    free_llm(ctx->llm, ctx->tokenizer);
+    free_sampler(ctx->sampler);
 }
 
-uint32_t on_prefilling(wchar_t *prompt, uint32_t pos, uint32_t num_prompt_tokens) {
+int32_t on_prefilling(Nano_Session *session) {
     // printf("Pre-filling...\n");
-    return 0;
+    return LLM_RUNNING_IN_PREFILLING;
 }
 
-uint32_t on_decoding(wchar_t *output, uint32_t pos, float tps) {
-    uint32_t output_length = wcslen(output);
-    printf("%lc", output[output_length - 1]);
+int32_t on_decoding(Nano_Session *session) {
+    uint32_t output_length = wcslen(session->output_text);
+    printf("%lc", session->output_text[output_length - 1]);
     fflush(stdout);
-    return 0;
+    return LLM_RUNNING_IN_DECODING;
 }
 
-uint32_t on_finished(wchar_t *output, uint32_t pos, float tps) {
-    printf("TPS = %f\n", tps);
-    return 0;
+int32_t on_finished(Nano_Session *session) {
+    printf("TPS = %f\n", session->tps);
+    return LLM_STOPPED_NORMALLY;
 }
 
 
@@ -48,18 +50,18 @@ int main() {
     unsigned long long random_seed = (unsigned int)time(NULL);
     uint32_t max_seq_len = 512;
 
-    load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
+    g_llm_ctx = load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
 
-    wchar_t prompt[1024] = L"<|instruct_mark|>";
-    wcscat(prompt, L"西红柿炒鸡蛋怎么做？");
-    wcscat(prompt, L"<|response_mark|>");
+    wchar_t *prompt = apply_chat_template(NULL, NULL, L"西红柿炒鸡蛋怎么做？");
 
-    int32_t flag = generate(ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
+    printf("%ls\n", prompt);
 
-    unload_model();
+    generate_sync(g_llm_ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
+
+    unload_model(g_llm_ctx);
 
 #ifdef MATMUL_PTHREAD
-    global_cleanup();
+    matmul_pthread_cleanup();
 #endif
 
     return 0;

@@ -13,28 +13,30 @@
 
 #define ALPHABET_COUNTDOWN_MAX (30)
 
-static Nano_Context ctx;
+static Nano_Context *g_llm_ctx;
 
 static char *MODEL_PATH_1 = "/emmc/_model/nano_168m_625000_sft_947000.bin";
 static char *MODEL_PATH_2 = "/emmc/_model/nano_56m_99000_sft_v2_200000.bin";
 static char *MODEL_PATH_3 = "/emmc/_model/1-基础模型-99000.bin";
 static char *LORA_PATH_3  = "/emmc/_model/2-插件-猫娘.bin";
 
-static float tps_of_last_session = 0.0f;
-static wchar_t output_of_last_session[OUTPUT_BUFFER_LENGTH];
+static float g_tps_of_last_session = 0.0f;
+static wchar_t g_output_of_last_session[OUTPUT_BUFFER_LENGTH];
 
-void load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
-    ctx.random_seed = rng_seed;
-    ctx.llm = (LLM *)calloc(1, (sizeof(LLM)));
-    ctx.tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
-    load_llm(ctx.llm, ctx.tokenizer, model_path);
-    ctx.sampler = build_sampler(ctx.llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx.random_seed);
-    ctx.lora = (lora_path) ? load_lora(ctx.llm, lora_path) : NULL;
+Nano_Context *load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
+    Nano_Context *ctx = (Nano_Context*)calloc(1, sizeof(Nano_Context));
+    ctx->random_seed = rng_seed;
+    ctx->llm = (LLM *)calloc(1, (sizeof(LLM)));
+    ctx->tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
+    load_llm(ctx->llm, ctx->tokenizer, model_path);
+    ctx->sampler = build_sampler(ctx->llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx->random_seed);
+    ctx->lora = (lora_path) ? load_lora(ctx->llm, lora_path) : NULL;
+    return ctx;
 }
 
-void unload_model() {
-    free_llm(ctx.llm, ctx.tokenizer);
-    free_sampler(ctx.sampler);
+void unload_model(Nano_Context *ctx) {
+    free_llm(ctx->llm, ctx->tokenizer);
+    free_sampler(ctx->sampler);
 }
 
 void show_splash_screen() {
@@ -174,41 +176,41 @@ uint32_t *refresh_input_buffer(uint32_t *input_buffer, int32_t *input_counter) {
 
 
 
-uint32_t on_prefilling(wchar_t *prompt, uint32_t pos, uint32_t num_prompt_tokens) {
+int32_t on_prefilling(Nano_Session *session) {
     // 按住A键中止推理
     char key = keyboard_read_key();
     if (key == 10) {
-        return 1;
+        return LLM_STOPPED_IN_PREFILLING;
     }
     render_text(L"Pre-filling...", 0);
     OLED_DrawLine(0, 60, 128, 60, 1);
     OLED_DrawLine(0, 63, 128, 63, 1);
     OLED_DrawLine(127, 60, 127, 63, 1);
-    OLED_DrawLine(0, 61, pos * 128 / (num_prompt_tokens - 2), 61, 1);
-    OLED_DrawLine(0, 62, pos * 128 / (num_prompt_tokens - 2), 62, 1);
+    OLED_DrawLine(0, 61, session->pos * 128 / (session->num_prompt_tokens - 2), 61, 1);
+    OLED_DrawLine(0, 62, session->pos * 128 / (session->num_prompt_tokens - 2), 62, 1);
     OLED_Refresh();
-    return 0;
+    return LLM_RUNNING_IN_PREFILLING;
 }
 
-uint32_t on_decoding(wchar_t *output, uint32_t pos, float tps) {
+int32_t on_decoding(Nano_Session *session) {
     // 按住A键中止推理
     char key = keyboard_read_key();
     if (key == 10) {
-        return 1;
+        return LLM_STOPPED_IN_DECODING;
     }
     OLED_SoftClear();
-    int32_t line_num = render_text(output, 0);
+    int32_t line_num = render_text(session->output_text, 0);
     render_scroll_bar(line_num, line_num - 5);
     OLED_Refresh();
-    return 0;
+    return LLM_RUNNING_IN_DECODING;
 }
 
-uint32_t on_finished(wchar_t *output, uint32_t pos, float tps) {
-    wcscpy(output_of_last_session, output);
+int32_t on_finished(Nano_Session *session) {
+    wcscpy(g_output_of_last_session, session->output_text);
 
-    tps_of_last_session = tps;
-    printf("TPS = %f\n", tps);
-    return 0;
+    g_tps_of_last_session = session->tps;
+    printf("TPS = %f\n", session->tps);
+    return LLM_STOPPED_NORMALLY;
 }
 
 
@@ -236,7 +238,7 @@ int main() {
     unsigned long long random_seed = (unsigned int)time(NULL);
     uint32_t max_seq_len = 512;
 
-    load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
+    g_llm_ctx = load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
 
     ///////////////////////////////////////
     // 矩阵按键初始化与读取
@@ -577,9 +579,9 @@ STATE_4:    // 选择语言模型状态
             case 4:
 
                 if (key == 1) {
-                    unload_model();
+                    unload_model(g_llm_ctx);
                     OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-168M-QA\n 请稍等...", 0); OLED_Refresh();
-                    load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
+                    g_llm_ctx = load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
                     OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
@@ -588,9 +590,9 @@ STATE_4:    // 选择语言模型状态
                 }
 
                 else if (key == 2) {
-                    unload_model();
+                    unload_model(g_llm_ctx);
                     OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-QA\n 请稍等...", 0); OLED_Refresh();
-                    load_model(MODEL_PATH_2, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
+                    g_llm_ctx = load_model(MODEL_PATH_2, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
                     OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
@@ -599,9 +601,9 @@ STATE_4:    // 选择语言模型状态
                 }
 
                 else if (key == 3) {
-                    unload_model();
+                    unload_model(g_llm_ctx);
                     OLED_SoftClear(); render_text(L" 正在加载语言模型\n Nano-56M-Neko\n 请稍等...", 0); OLED_Refresh();
-                    load_model(MODEL_PATH_3, LORA_PATH_3, repetition_penalty, temperature, top_p, top_k, random_seed);
+                    g_llm_ctx = load_model(MODEL_PATH_3, LORA_PATH_3, repetition_penalty, temperature, top_p, top_k, random_seed);
                     OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
                     usleep(1000*1000);
                     render_input_buffer(input_buffer, ime_mode_flag, 1);
@@ -652,11 +654,9 @@ STATE_10:   // 提交候选字到LLM，开始推理
                 if (key == 13) {
                     OLED_SoftClear();
 
-                    wchar_t prompt[1024] = L"<|instruct_mark|>";
-                    wcscat(prompt, input_buffer); // "<|instruct_mark|>西红柿炒鸡蛋怎么做？<|response_mark|>"
-                    wcscat(prompt, L"<|response_mark|>");
+                    wchar_t *prompt = apply_chat_template(NULL, NULL, input_buffer);
 
-                    int32_t flag = generate(ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
+                    int32_t flag = generate_sync(g_llm_ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
 
                     if (flag == LLM_STOPPED_IN_PREFILLING || flag == LLM_STOPPED_IN_DECODING) {
                         printf("推理中止。\n");
@@ -677,13 +677,13 @@ STATE_10:   // 提交候选字到LLM，开始推理
                         wchar_t prompt_and_output[2048] = L"Homo:\n";
                         wcscat(prompt_and_output, input_buffer);
                         wcscat(prompt_and_output, L"\n--------------------\nNano:\n");
-                        wcscat(prompt_and_output, output_of_last_session);
+                        wcscat(prompt_and_output, g_output_of_last_session);
                         wchar_t tps_wcstr[50];
-                        swprintf(tps_wcstr, 50, L"\n\n[平均速度%.1f词元/秒]", tps_of_last_session);
+                        swprintf(tps_wcstr, 50, L"\n\n[平均速度%.1f词元/秒]", g_tps_of_last_session);
                         wcscat(prompt_and_output, tps_wcstr);
 
-                        wcscpy(output_of_last_session, prompt_and_output);
-                        output_line_num = render_text(output_of_last_session, 0);
+                        wcscpy(g_output_of_last_session, prompt_and_output);
+                        output_line_num = render_text(g_output_of_last_session, 0);
                         render_scroll_bar(output_line_num, output_line_num - 5);
                         OLED_Refresh();
 
@@ -705,7 +705,7 @@ STATE_10:   // 提交候选字到LLM，开始推理
                 else if (key == 10) {
                     OLED_SoftClear();
                     wchar_t tps_wcstr[1024];
-                    swprintf(tps_wcstr, 1024, L"推理结束^_^\n\n平均速度%.1f词元/秒", tps_of_last_session);
+                    swprintf(tps_wcstr, 1024, L"推理结束^_^\n\n平均速度%.1f词元/秒", g_tps_of_last_session);
                     render_text(tps_wcstr, 0);
                     OLED_Refresh();
 
@@ -728,7 +728,7 @@ STATE_10:   // 提交候选字到LLM，开始推理
                     }
 
                     OLED_SoftClear();
-                    render_text(output_of_last_session, output_shift);
+                    render_text(g_output_of_last_session, output_shift);
                     render_scroll_bar(output_line_num, output_line_num - output_shift - 5);
                     OLED_Refresh();
 
@@ -745,7 +745,7 @@ STATE_10:   // 提交候选字到LLM，开始推理
                     }
 
                     OLED_SoftClear();
-                    render_text(output_of_last_session, output_shift);
+                    render_text(g_output_of_last_session, output_shift);
                     render_scroll_bar(output_line_num, output_line_num - output_shift - 5);
                     OLED_Refresh();
 
@@ -801,12 +801,12 @@ STATE_10:   // 提交候选字到LLM，开始推理
 
     }
 
-    unload_model();
+    unload_model(g_llm_ctx);
 
     OLED_Close();
 
 #ifdef MATMUL_PTHREAD
-    global_cleanup();
+    matmul_pthread_cleanup();
 #endif
 
     return 0;

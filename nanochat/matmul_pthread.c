@@ -143,7 +143,7 @@ void matmul_pthread(float* xout, float* x, float* w, int n, int d) {
 }
 
 /* 程序结束时调用 */
-void global_cleanup() {
+void matmul_pthread_cleanup() {
     if (g_threadpool) {
         threadpool_destroy(g_threadpool);
         g_threadpool = NULL;
