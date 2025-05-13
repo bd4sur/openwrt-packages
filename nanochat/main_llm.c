@@ -2,25 +2,11 @@
 
 #define OUTPUT_BUFFER_LENGTH (512)
 
+// 推理引擎实例（单例模式）
 static Nano_Context *g_llm_ctx;
 
 static char *MODEL_PATH_1 = "/emmc/_model/nano_168m_625000_sft_947000.bin";
 
-Nano_Context *load_model(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, unsigned int top_k, unsigned long long rng_seed) {
-    Nano_Context *ctx = (Nano_Context*)calloc(1, sizeof(Nano_Context));
-    ctx->random_seed = rng_seed;
-    ctx->llm = (LLM *)calloc(1, (sizeof(LLM)));
-    ctx->tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
-    load_llm(ctx->llm, ctx->tokenizer, model_path);
-    ctx->sampler = build_sampler(ctx->llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx->random_seed);
-    ctx->lora = (lora_path) ? load_lora(ctx->llm, lora_path) : NULL;
-    return ctx;
-}
-
-void unload_model(Nano_Context *ctx) {
-    free_llm(ctx->llm, ctx->tokenizer);
-    free_sampler(ctx->sampler);
-}
 
 int32_t on_prefilling(Nano_Session *session) {
     // printf("Pre-filling...\n");
@@ -50,7 +36,7 @@ int main() {
     unsigned long long random_seed = (unsigned int)time(NULL);
     uint32_t max_seq_len = 512;
 
-    g_llm_ctx = load_model(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
+    g_llm_ctx = llm_context_init(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
 
     wchar_t *prompt = apply_chat_template(NULL, NULL, L"西红柿炒鸡蛋怎么做？");
 
@@ -58,7 +44,7 @@ int main() {
 
     generate_sync(g_llm_ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
 
-    unload_model(g_llm_ctx);
+    llm_context_free(g_llm_ctx);
 
 #ifdef MATMUL_PTHREAD
     matmul_pthread_cleanup();

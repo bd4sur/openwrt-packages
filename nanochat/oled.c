@@ -127,40 +127,6 @@ void OLED_Init(void) {
     OLED_WriteCommand(0x20); // Set Memory Addressing Mode
     OLED_WriteCommand(0x00); // Set Memory Addressing Mode ab Horizontal addressing mode
     OLED_WriteCommand(0xAF);
-
-/*
-    OLED_WriteCommand(0xAE);            //display off
-    OLED_WriteCommand(0xA6);            //Set Normal Display (default)
-    OLED_WriteCommand(0xAE);            //DISPLAYOFF
-    OLED_WriteCommand(0xD5);            //SETDISPLAYCLOCKDIV
-    OLED_WriteCommand(0x80);            // the suggested ratio 0x80
-    OLED_WriteCommand(0xA8);            //SSD1306_SETMULTIPLEX
-    OLED_WriteCommand(0x3F);
-    OLED_WriteCommand(0xD3);            //SETDISPLAYOFFSET
-    OLED_WriteCommand(0x0);             //no offset
-    OLED_WriteCommand(0x40|0x0);        //SETSTARTLINE
-    OLED_WriteCommand(0x8D);            //CHARGEPUMP
-    OLED_WriteCommand(0x14);
-    OLED_WriteCommand(0x20);            //MEMORYMODE
-    OLED_WriteCommand(0x00);            //0x0 act like ks0108
-    OLED_WriteCommand(0xA1);            //SEGREMAP   Mirror screen horizontally (A0)
-    OLED_WriteCommand(0xC8);            //COMSCANDEC Rotate screen vertically (C0)
-    OLED_WriteCommand(0xDA);            //0xDA
-    OLED_WriteCommand(0x12);            //COMSCANDEC
-    OLED_WriteCommand(0x81);            //SETCONTRAST
-    OLED_WriteCommand(0xFF);            //
-    OLED_WriteCommand(0xd9);            //SETPRECHARGE 
-    OLED_WriteCommand(0xF1); 
-    OLED_WriteCommand(0xDB);            //SETVCOMDETECT                
-    OLED_WriteCommand(0x40);
-    OLED_WriteCommand(0xA4);            //DISPLAYALLON_RESUME        
-    OLED_WriteCommand(0xA6);            //NORMALDISPLAY             
-    OLED_Clear();
-    OLED_WriteCommand(0x2E);            //Stop scroll
-    OLED_WriteCommand(0x20);            //Set Memory Addressing Mode
-    OLED_WriteCommand(0x00);            //Set Memory Addressing Mode ab Horizontal addressing mode
-    OLED_WriteCommand(0xAF);
-*/
 }
 
 void OLED_Close(void) {

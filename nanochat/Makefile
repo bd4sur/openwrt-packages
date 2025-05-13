@@ -5,7 +5,7 @@ APP_BINARY = nanochat
 
 all: $(APP_BINARY)
 
-$(APP_BINARY): main.c oled.c avltree.c hashmap.c trie.c matmul_pthread.c infer.c
+$(APP_BINARY): main.c oled.c ui.c avltree.c hashmap.c trie.c matmul_pthread.c infer.c
 	$(CC) $(CCFLAGS) $^ -o $@ $(LDFLAGS)
 
 llm: main_llm.c hashmap.c trie.c matmul_pthread.c infer.c

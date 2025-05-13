@@ -205,6 +205,9 @@ void load_llm(LLM *llm, Tokenizer *tk, char *model_path);
 Sampler *build_sampler(int vocab_size, float repetition_penalty, float temperature, float top_p, uint32_t top_k, unsigned long long rng_seed);
 LoRA *load_lora(LLM *llm, char *lora_path);
 
+Nano_Context *llm_context_init(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, uint32_t top_k, unsigned long long random_seed);
+void llm_context_free(Nano_Context *ctx);
+
 uint32_t *encode(Tokenizer *t, wchar_t *text, uint32_t *n_tokens_ptr);
 wchar_t *decode(Tokenizer *t, uint32_t *ids, uint32_t len);
 wchar_t *apply_chat_template(wchar_t *system_prompt, wchar_t *history, wchar_t *user_input);

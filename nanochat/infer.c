@@ -433,6 +433,27 @@ void free_lora(LLM *llm, LoRA *lora) {
 
 
 // ===============================================================================
+// 推理引擎单例（现在暂且叫context）管理
+// ===============================================================================
+
+Nano_Context *llm_context_init(char *model_path, char *lora_path, float repetition_penalty, float temperature, float top_p, uint32_t top_k, unsigned long long random_seed) {
+    Nano_Context *ctx = (Nano_Context*)calloc(1, sizeof(Nano_Context));
+    ctx->random_seed = random_seed;
+    ctx->llm = (LLM *)calloc(1, (sizeof(LLM)));
+    ctx->tokenizer = (Tokenizer *)calloc(1, (sizeof(Tokenizer)));
+    load_llm(ctx->llm, ctx->tokenizer, model_path);
+    ctx->sampler = build_sampler(ctx->llm->config.vocab_size, repetition_penalty, temperature, top_p, top_k, ctx->random_seed);
+    ctx->lora = (lora_path) ? load_lora(ctx->llm, lora_path) : NULL;
+    return ctx;
+}
+
+void llm_context_free(Nano_Context *ctx) {
+    free_llm(ctx->llm, ctx->tokenizer);
+    free_sampler(ctx->sampler);
+}
+
+
+// ===============================================================================
 // 基础算子
 //   所有算子都是C风格的：函数本身不返回值，通过参数引用的buffer来传递计算结果。
 // ===============================================================================
