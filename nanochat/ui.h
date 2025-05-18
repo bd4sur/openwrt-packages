@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#define INPUT_BUFFER_LENGTH  (1024)
-#define OUTPUT_BUFFER_LENGTH (512)
+#define INPUT_BUFFER_LENGTH  (4096)
+#define OUTPUT_BUFFER_LENGTH (32768)
 
 #define IME_MODE_HANZI    (0)
 #define IME_MODE_ALPHABET (1)

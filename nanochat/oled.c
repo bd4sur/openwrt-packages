@@ -456,8 +456,8 @@ int32_t render_text(wchar_t *text, int32_t line_shift) {
         }
         uint8_t *glyph = get_glyph(current_char, &font_width, &font_height);
         if (!glyph) {
-            printf("出现了字库之外的字符！\n");
-            continue;
+            printf("出现了字库之外的字符[%d]\n", current_char);
+            glyph = get_glyph(63, &font_width, &font_height); // 用“?”代替
         }
         if (x_pos + font_width >= 128) {
             y_pos += (font_height + 1);

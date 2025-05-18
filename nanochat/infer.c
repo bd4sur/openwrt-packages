@@ -8,6 +8,7 @@
 
 
 #include "infer.h"
+#include "bpe.h"
 
 
 // ===============================================================================
@@ -99,14 +100,29 @@ wchar_t *apply_chat_template(wchar_t *system_prompt, wchar_t *history, wchar_t *
 // 模型文件解析·内存管理
 // ===============================================================================
 
-void malloc_fwd_buffer(FwdBuffer *s, LLM_Config *llm_cfg) {
+void malloc_fwd_buffer(LLM *llm) {
+    FwdBuffer *s = &(llm->state);
+    LLM_Config *llm_cfg = &(llm->config);
+
+    uint32_t q_dim = llm_cfg->n_embd;
     uint32_t kv_dim = (llm_cfg->n_embd * llm_cfg->n_kv_head) / llm_cfg->n_head;
+
+    if (llm->arch == LLM_ARCH_NANO || llm->arch == LLM_ARCH_QWEN2) {
+        q_dim = llm_cfg->n_embd;
+        kv_dim = (llm_cfg->n_embd * llm_cfg->n_kv_head) / llm_cfg->n_head;
+    }
+    else if (llm->arch == LLM_ARCH_QWEN3) {
+        q_dim = llm_cfg->head_dim * llm_cfg->n_head;
+        kv_dim = llm_cfg->head_dim * llm_cfg->n_kv_head;
+    }
+
     s->x       = calloc(llm_cfg->n_embd, sizeof(float));
     s->xb      = calloc(llm_cfg->n_embd, sizeof(float));
+    s->xba     = calloc(q_dim, sizeof(float));
     s->xb2     = calloc(llm_cfg->n_embd, sizeof(float));
     s->hb      = calloc(llm_cfg->n_hidden, sizeof(float));
     s->hb2     = calloc(llm_cfg->n_hidden, sizeof(float));
-    s->q       = calloc(llm_cfg->n_embd, sizeof(float));
+    s->q       = calloc(q_dim, sizeof(float));
     s->k_cache = calloc(llm_cfg->n_layer * llm_cfg->block_size * kv_dim, sizeof(float));
     s->v_cache = calloc(llm_cfg->n_layer * llm_cfg->block_size * kv_dim, sizeof(float));
     s->att     = calloc(llm_cfg->n_head * llm_cfg->block_size, sizeof(float));
@@ -123,6 +139,7 @@ void malloc_fwd_buffer(FwdBuffer *s, LLM_Config *llm_cfg) {
 void free_fwd_buffer(FwdBuffer* s) {
     free(s->x);
     free(s->xb);
+    free(s->xba);
     free(s->xb2);
     free(s->hb);
     free(s->hb2);
@@ -135,32 +152,51 @@ void free_fwd_buffer(FwdBuffer* s) {
     // free(s->q1); free(s->k1); free(s->v1); free(s->o1);
 }
 
-void memory_map_params(LLM_Param *w, LLM_Config* p, float* ptr, int shared_weights) {
-    int head_size = p->n_embd / p->n_head;
-    // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
-    unsigned long long n_layer = p->n_layer;
+void memory_map_params(LLM *llm, float* ptr) {
+    LLM_Param *w = &(llm->params);
+    LLM_Config *cfg = &(llm->config);
 
-    w->token_embedding = ptr;ptr += p->vocab_size * p->n_embd;
-    w->rms_norm_attn = ptr;  ptr += n_layer * p->n_embd;
-    w->wq = ptr;             ptr += n_layer * p->n_embd * (p->n_head * head_size);
-    w->wk = ptr;             ptr += n_layer * p->n_embd * (p->n_kv_head * head_size);
-    w->wv = ptr;             ptr += n_layer * p->n_embd * (p->n_kv_head * head_size);
-    w->wo = ptr;             ptr += n_layer * (p->n_head * head_size) * p->n_embd;
-    w->rms_norm_ffn = ptr;   ptr += n_layer * p->n_embd;
-    w->w1 = ptr;             ptr += n_layer * p->n_embd * p->n_hidden;
-    w->w2 = ptr;             ptr += n_layer * p->n_hidden * p->n_embd;
-    w->w3 = ptr;             ptr += n_layer * p->n_embd * p->n_hidden;
-    w->rms_norm_final = ptr; ptr += p->n_embd;
-    w->freq_cis_real = ptr;  ptr += p->block_size * head_size / 2;
-    w->freq_cis_imag = ptr;  ptr += p->block_size * head_size / 2;
-    w->token_classifier = shared_weights ? w->token_embedding : ptr;
+    int head_size = cfg->n_embd / cfg->n_head;
+
+    if (llm->arch == LLM_ARCH_NANO || llm->arch == LLM_ARCH_QWEN2) {
+        head_size = cfg->n_embd / cfg->n_head;
+    }
+    else if (llm->arch == LLM_ARCH_QWEN3) {
+        head_size = cfg->head_dim;
+    }
+
+    // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
+    unsigned long long n_layer = cfg->n_layer;
+
+    w->token_embedding = ptr;ptr += cfg->vocab_size * cfg->n_embd;
+    w->rms_norm_attn = ptr;  ptr += n_layer * cfg->n_embd;
+    w->wq = ptr;             ptr += n_layer * cfg->n_embd * (cfg->n_head * head_size);
+    w->wk = ptr;             ptr += n_layer * cfg->n_embd * (cfg->n_kv_head * head_size);
+    w->wv = ptr;             ptr += n_layer * cfg->n_embd * (cfg->n_kv_head * head_size);
+    w->wo = ptr;             ptr += n_layer * (cfg->n_head * head_size) * cfg->n_embd;
+    if (llm->arch == LLM_ARCH_QWEN2) {
+        w->bq = ptr;         ptr += n_layer * (cfg->n_head * head_size);
+        w->bk = ptr;         ptr += n_layer * (cfg->n_kv_head * head_size);
+        w->bv = ptr;         ptr += n_layer * (cfg->n_kv_head * head_size);
+    }
+    else if (llm->arch == LLM_ARCH_QWEN3) {
+        w->q_norm = ptr;     ptr += n_layer * head_size;
+        w->k_norm = ptr;     ptr += n_layer * head_size;
+    }
+    w->rms_norm_ffn = ptr;   ptr += n_layer * cfg->n_embd;
+    w->w1 = ptr;             ptr += n_layer * cfg->n_embd * cfg->n_hidden;
+    w->w2 = ptr;             ptr += n_layer * cfg->n_hidden * cfg->n_embd;
+    w->w3 = ptr;             ptr += n_layer * cfg->n_embd * cfg->n_hidden;
+    w->rms_norm_final = ptr; ptr += cfg->n_embd;
+    w->freq_cis_real = ptr;  ptr += cfg->block_size * head_size / 2;
+    w->freq_cis_imag = ptr;  ptr += cfg->block_size * head_size / 2;
+    w->token_classifier = cfg->is_shared_classifier ? w->token_embedding : ptr;
 }
 
 
 void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
 
     LLM_Config *config = &(llm->config);
-    LLM_Param *params = &(llm->params);
 
     // 读取文件头
     const uint32_t header_byte_length = 256;
@@ -175,7 +211,7 @@ void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
     /*uint32_t major_version  = header[offset];*/ offset++;
     /*uint32_t minor_version  = header[offset];*/ offset++;
 
-    /*uint32_t model_type     = header[offset];*/ offset++;
+    uint32_t model_type     = header[offset]; offset++;
     /*uint32_t config_length  = header[offset];*/ offset++;
 
     config->block_size      = header[offset]; offset++;
@@ -186,68 +222,77 @@ void parse_model_file(char* buffer, LLM *llm, Tokenizer *tk) {
     config->n_kv_head       = header[offset]; offset++;
     config->n_hidden        = header[offset]; offset++;
     config->is_shared_classifier = header[offset]; offset++;
+    config->head_dim        = header[offset]; offset++;
+
+    llm->arch = model_type;
 
     // 解析词表，同时构建trie树和hashmap
 
     uint32_t *tokenzier_ptr = (uint32_t *)(buffer) + (header_byte_length / sizeof(uint32_t));
     uint32_t tokenizer_field_bytes = *tokenzier_ptr;
-    uint32_t *vocab_ptr = tokenzier_ptr + 1;
 
-    uint32_t byte_count = 0;
-    uint32_t char_count = 0;
+    if (llm->arch == LLM_ARCH_NANO) {
+        uint32_t *vocab_ptr = tokenzier_ptr + 1;
 
-    tk->vocab_size = *vocab_ptr; vocab_ptr++;
+        uint32_t byte_count = 0;
+        uint32_t char_count = 0;
 
-    tk->token_list        = (wchar_t **)calloc(tk->vocab_size, sizeof(wchar_t *));
-    tk->unicode_charset   = (wchar_t  *)calloc(tk->vocab_size, sizeof(wchar_t));
-    tk->unicode_to_id_map = new_map(tk->vocab_size);
-    tk->token_to_id_map   = new_map(tk->vocab_size);
-    tk->vocab_trie        = new_trie(tk->vocab_size, 0);
+        tk->vocab_size = *vocab_ptr; vocab_ptr++;
 
-    while(byte_count < tokenizer_field_bytes - 8) { // 不含tokenizer_field_bytes和vocab_size字段的8个字节
-        uint32_t token_header = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
-        uint32_t token_id     = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
+        tk->token_list        = (wchar_t **)calloc(tk->vocab_size, sizeof(wchar_t *));
+        tk->unicode_charset   = (wchar_t  *)calloc(tk->vocab_size, sizeof(wchar_t));
+        tk->unicode_to_id_map = new_map(tk->vocab_size);
+        tk->token_to_id_map   = new_map(tk->vocab_size);
+        tk->vocab_trie        = new_trie(tk->vocab_size, 0);
 
-        // NOTE Little endian 小端序！如果按照uint32解析，顺序是 MSB(reserved_1 reserved_0 is_special token_length)LSB
-        // uint32_t reserved_1   = (token_header & 0xff000000) >> 24;
-        // uint32_t reserved_0   = (token_header & 0x00ff0000) >> 16;
-        // uint32_t is_special   = (token_header & 0x0000ff00) >> 8;
-        uint32_t token_length = (token_header & 0x000000ff);
+        while(byte_count < tokenizer_field_bytes - 8) { // 不含tokenizer_field_bytes和vocab_size字段的8个字节
+            uint32_t token_header = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
+            uint32_t token_id     = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
 
-        wchar_t *token = (wchar_t *)calloc(token_length+1, sizeof(wchar_t));
-        // 如果是单个字符，则加入unicode_charset
-        if(token_length == 1) {
-            tk->unicode_charset[char_count] = *vocab_ptr;
-            map_set(tk->unicode_to_id_map, *vocab_ptr, token_id);
-            char_count++;
+            // NOTE Little endian 小端序！如果按照uint32解析，顺序是 MSB(reserved_1 reserved_0 is_special token_length)LSB
+            // uint32_t reserved_1   = (token_header & 0xff000000) >> 24;
+            // uint32_t reserved_0   = (token_header & 0x00ff0000) >> 16;
+            // uint32_t is_special   = (token_header & 0x0000ff00) >> 8;
+            uint32_t token_length = (token_header & 0x000000ff);
+
+            wchar_t *token = (wchar_t *)calloc(token_length+1, sizeof(wchar_t));
+            // 如果是单个字符，则加入unicode_charset
+            if(token_length == 1) {
+                tk->unicode_charset[char_count] = *vocab_ptr;
+                map_set(tk->unicode_to_id_map, *vocab_ptr, token_id);
+                char_count++;
+            }
+            for(uint32_t i = 0; i < token_length; i++) {
+                token[i] = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
+            }
+            token[token_length] = 0;
+            tk->token_list[token_id] = token;
         }
-        for(uint32_t i = 0; i < token_length; i++) {
-            token[i] = *vocab_ptr; vocab_ptr++; byte_count += sizeof(uint32_t);
+
+        // 构建trie树
+        for(uint32_t i = 0; i < tk->vocab_size; i++) {
+            wchar_t *utoken = tk->token_list[i];
+            uint32_t len = wcslen(utoken);
+            if(len > 1) {
+                uint32_t *ids = string_to_ids(tk->unicode_to_id_map, utoken);
+                add_token(tk->vocab_trie, ids, len, i);
+            }
         }
-        token[token_length] = 0;
-        tk->token_list[token_id] = token;
     }
-
-    // 构建trie树
-    for(uint32_t i = 0; i < tk->vocab_size; i++) {
-        wchar_t *utoken = tk->token_list[i];
-        uint32_t len = wcslen(utoken);
-        if(len > 1) {
-            uint32_t *ids = string_to_ids(tk->unicode_to_id_map, utoken);
-            add_token(tk->vocab_trie, ids, len, i);
-        }
+    else if (llm->arch == LLM_ARCH_QWEN2 || llm->arch == LLM_ARCH_QWEN3) {
+        build_bpe_tokenizer(tk, (char*)tokenzier_ptr, 151669);
     }
 
     // 解析模型参数
 
-    float *param_ptr = (float*)(tokenzier_ptr + tokenizer_field_bytes/sizeof(uint32_t));
-    memory_map_params(params, config, param_ptr, config->is_shared_classifier);
+    float *param_ptr = (float*)((char*)tokenzier_ptr + tokenizer_field_bytes);
+    memory_map_params(llm, param_ptr);
 }
 
 
 void load_llm_from_buffer(LLM *llm, Tokenizer *tk, char *buffer) {
     parse_model_file(buffer, llm, tk);
-    malloc_fwd_buffer(&llm->state, &llm->config);
+    malloc_fwd_buffer(llm);
 }
 
 
@@ -296,7 +341,12 @@ void free_llm(LLM* llm, Tokenizer *tk) {
 #else
     free(llm->buffer);
 #endif
-    free_tokenizer(tk);
+    if (llm->arch == LLM_ARCH_NANO) {
+        free_tokenizer(tk);
+    }
+    else if (llm->arch == LLM_ARCH_QWEN2 || llm->arch == LLM_ARCH_QWEN3) {
+        free_bpe_tokenizer(tk);
+    }
     free_fwd_buffer(&llm->state);
 }
 
@@ -307,7 +357,9 @@ void free_llm(LLM* llm, Tokenizer *tk) {
 // ===============================================================================
 
 
-void malloc_fwd_buffer_with_lora(FwdBuffer *s, LLM_Config *llm_cfg, LoRA_Config *lora_cfg) {
+void malloc_fwd_buffer_with_lora(LLM *llm, LoRA_Config *lora_cfg) {
+    FwdBuffer *s = &(llm->state);
+    LLM_Config *llm_cfg = &(llm->config);
     uint32_t kv_dim = (llm_cfg->n_embd * llm_cfg->n_kv_head) / llm_cfg->n_head;
     s->q0 = calloc(lora_cfg->lora_rank, sizeof(float));
     s->k0 = calloc(lora_cfg->lora_rank, sizeof(float));
@@ -411,7 +463,7 @@ LoRA *load_lora(LLM *llm, char *lora_path) {
 
     parse_lora_file(lora_buffer, p_lora, llm);
 
-    malloc_fwd_buffer_with_lora(&llm->state, &llm->config, &p_lora->config);
+    malloc_fwd_buffer_with_lora(llm, &p_lora->config);
 
     return p_lora;
 }
@@ -522,6 +574,17 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 #endif
 }
 
+void rope(float *head, uint32_t head_dim, uint32_t pos) {
+    for (uint32_t i = 0; i < head_dim / 2; i++) {
+        float freq = 1.0f / powf(1000000.0f, (float)(i * 2) / (float)head_dim); // QWEN3_ROPE_THETA = 1000000.0
+        float fcr = cosf(pos * freq);
+        float fci = sinf(pos * freq);
+        float v0 = head[i];
+        float v1 = head[i + head_dim / 2];
+        head[       i        ] = v0 * fcr - v1 * fci;
+        head[i + head_dim / 2] = v1 * fcr + v0 * fci;
+    }
+}
 
 
 float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
@@ -542,10 +605,24 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
 
     float *x = s->x;
     int n_embd = cfg->n_embd;
-    int kv_dim = (cfg->n_embd * cfg->n_kv_head) / cfg->n_head;
+
+    uint32_t head_dim = n_embd / cfg->n_head;
+    uint32_t q_dim = cfg->n_embd;
+    uint32_t kv_dim = (cfg->n_embd * cfg->n_kv_head) / cfg->n_head;
+
+    if (llm->arch == LLM_ARCH_NANO || llm->arch == LLM_ARCH_QWEN2) {
+        head_dim = n_embd / cfg->n_head;
+        q_dim = cfg->n_embd;
+        kv_dim = (cfg->n_embd * cfg->n_kv_head) / cfg->n_head;
+    }
+    else if (llm->arch == LLM_ARCH_QWEN3) {
+        head_dim = cfg->head_dim;
+        q_dim = head_dim * cfg->n_head;
+        kv_dim = head_dim * cfg->n_kv_head;
+    }
+
     int kv_mul = cfg->n_head / cfg->n_kv_head; // integer multiplier of the kv sharing in multiquery
     int n_hidden =  cfg->n_hidden;
-    int head_dim = n_embd / cfg->n_head;
 
     // copy the token embedding into x
     float* content_row = w->token_embedding + token * n_embd;
@@ -567,11 +644,15 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
         s->v = s->v_cache + layer_offset + pos * kv_dim;
 
         // qkv matmuls for this position
-        matmul(s->q, s->xb, w->wq + l*n_embd*n_embd, n_embd, n_embd);
-        matmul(s->k, s->xb, w->wk + l*n_embd*kv_dim, n_embd, kv_dim);
-        matmul(s->v, s->xb, w->wv + l*n_embd*kv_dim, n_embd, kv_dim);
+        matmul(s->q, s->xb, w->wq + l*q_dim*n_embd,  n_embd, q_dim);
+        matmul(s->k, s->xb, w->wk + l*kv_dim*n_embd, n_embd, kv_dim);
+        matmul(s->v, s->xb, w->wv + l*kv_dim*n_embd, n_embd, kv_dim);
 
-        if(use_lora == 1) {
+        if (llm->arch == LLM_ARCH_QWEN2) {
+            // TODO Qwen2 bq bk bv
+        }
+
+        if(llm->arch == LLM_ARCH_NANO && use_lora == 1) {
             matmul(s->q0, s->xb, a->wq_lora_a + l * lora_rank * n_embd, n_embd, lora_rank);
             matmul(s->k0, s->xb, a->wk_lora_a + l * lora_rank * n_embd, n_embd, lora_rank);
             matmul(s->v0, s->xb, a->wv_lora_a + l * lora_rank * n_embd, n_embd, lora_rank);
@@ -589,48 +670,62 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
             accum(s->v, s->v1, kv_dim);
         }
 
-        // RoPE旋转位置编码实现方式1：使用模型提供的旋转系数
-        for (int h = 0; h < cfg->n_head; h++) {
-            float *q = s->q + h * head_dim;
-            for (int i = 0; i < head_dim; i += 2) {
-                float q0 = q[i];
-                float q1 = q[i + 1];
-                float fcr = freq_cis_real_row[i / 2];
-                float fci = freq_cis_imag_row[i / 2];
-                q[i] = q0 * fcr - q1 * fci;
-                q[i + 1] = q0 * fci + q1 * fcr;
+        if (llm->arch == LLM_ARCH_NANO || llm->arch == LLM_ARCH_QWEN2) {
+            // RoPE旋转位置编码实现方式1：使用模型提供的旋转系数
+            for (int h = 0; h < cfg->n_head; h++) {
+                float *q = s->q + h * head_dim;
+                for (int i = 0; i < head_dim; i += 2) {
+                    float q0 = q[i];
+                    float q1 = q[i + 1];
+                    float fcr = freq_cis_real_row[i / 2];
+                    float fci = freq_cis_imag_row[i / 2];
+                    q[i] = q0 * fcr - q1 * fci;
+                    q[i + 1] = q0 * fci + q1 * fcr;
+                }
             }
-        }
-        for (int m = 0; m < cfg->n_kv_head; m++) {
-            float *k = s->k + m * head_dim;
-            for (int i = 0; i < head_dim; i += 2) {
-                float k0 = k[i];
-                float k1 = k[i + 1];
-                float fcr = freq_cis_real_row[i / 2];
-                float fci = freq_cis_imag_row[i / 2];
-                k[i] = k0 * fcr - k1 * fci;
-                k[i + 1] = k0 * fci + k1 * fcr;
+            for (int m = 0; m < cfg->n_kv_head; m++) {
+                float *k = s->k + m * head_dim;
+                for (int i = 0; i < head_dim; i += 2) {
+                    float k0 = k[i];
+                    float k1 = k[i + 1];
+                    float fcr = freq_cis_real_row[i / 2];
+                    float fci = freq_cis_imag_row[i / 2];
+                    k[i] = k0 * fcr - k1 * fci;
+                    k[i + 1] = k0 * fci + k1 * fcr;
+                }
             }
-        }
 
-        // RoPE旋转位置编码实现方式2：直接计算旋转系数
-        /*
-        for (int i = 0; i < n_embd; i+=2) {
-            int head_dim = i % head_dim;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_dim);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++) {
-                float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
-                float v0 = vec[i];
-                float v1 = vec[i+1];
-                vec[i]   = v0 * fcr - v1 * fci;
-                vec[i+1] = v0 * fci + v1 * fcr;
+            // RoPE旋转位置编码实现方式2：直接计算旋转系数
+            /*
+            for (int i = 0; i < n_embd; i+=2) {
+                int head_dim = i % head_dim;
+                float freq = 1.0f / powf(10000.0f, head_dim / (float)head_dim);
+                float val = pos * freq;
+                float fcr = cosf(val);
+                float fci = sinf(val);
+                int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
+                for (int v = 0; v < rotn; v++) {
+                    float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
+                    float v0 = vec[i];
+                    float v1 = vec[i+1];
+                    vec[i]   = v0 * fcr - v1 * fci;
+                    vec[i+1] = v0 * fci + v1 * fcr;
+                }
+            }
+            */
+        }
+        else if (llm->arch == LLM_ARCH_QWEN3) {
+            for (int h = 0; h < cfg->n_head; h++) {
+                float *q = s->q + h * head_dim;
+                rmsnorm(q, q, w->q_norm + l*head_dim, head_dim);
+                rope(q, head_dim, pos);
+            }
+            for (int h = 0; h < cfg->n_kv_head; h++) {
+                float *k = s->k + h * head_dim;
+                rmsnorm(k, k, w->k_norm + l*head_dim, head_dim);
+                rope(k, head_dim, pos);
             }
         }
-        */
 
         // multihead attention. iterate over all heads
         int h;
@@ -657,28 +752,28 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
             // softmax the scores to get attention weights, from 0..pos inclusively
             softmax(att, pos + 1);
 
-            // weighted sum of the values, store back into xb
-            float* xb = s->xb + h * head_dim;
-            memset(xb, 0, head_dim * sizeof(float));
+            // weighted sum of the values, store back into xba
+            float* xba = s->xba + h * head_dim;
+            memset(xba, 0, head_dim * sizeof(float));
             for (int t = 0; t <= pos; t++) {
                 // get the value vector for this head and at this timestep
                 float* v = s->v_cache + layer_offset + t * kv_dim + (h / kv_mul) * head_dim;
                 // get the attention weight for this timestep
                 float a = att[t];
-                // accumulate the weighted value into xb
+                // accumulate the weighted value into xba
                 for (int i = 0; i < head_dim; i++) {
-                    xb[i] += a * v[i];
+                    xba[i] += a * v[i];
                 }
             }
         }
 
         // final matmul to get the output of the attention
-        matmul(s->xb2, s->xb, w->wo + l*n_embd*n_embd, n_embd, n_embd);
+        matmul(s->xb2, s->xba, w->wo + l*n_embd*q_dim, q_dim, n_embd);
 
         // 计算output的低秩分解分支，并将其累加到原来的输出上
         if(use_lora == 1) {
-            matmul(s->o0, s->xb, a->wo_lora_a + l * lora_rank * n_embd, n_embd, lora_rank);
-            matmul(s->o1, s->o0, a->wo_lora_b + l * n_embd * lora_rank, lora_rank, n_embd);
+            matmul(s->o0, s->xba, a->wo_lora_a + l * lora_rank * q_dim,  q_dim,    lora_rank);
+            matmul(s->o1, s->o0,  a->wo_lora_b + l * n_embd * lora_rank, lora_rank, n_embd);
             scale(s->o1, ((float)lora_alpha / (float)lora_rank), n_embd);
             accum(s->xb2, s->o1, n_embd);
         }
@@ -693,8 +788,8 @@ float* llm_forward(uint32_t token, uint32_t pos, LLM* llm, LoRA *lora) {
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
         // first calculate self.w1(x) and self.w3(x)
-        matmul(s->hb, s->xb, w->w1 + l*n_embd*n_hidden, n_embd, n_hidden);
-        matmul(s->hb2, s->xb, w->w3 + l*n_embd*n_hidden, n_embd, n_hidden);
+        matmul(s->hb, s->xb, w->w1 + l*n_hidden*n_embd, n_embd, n_hidden);
+        matmul(s->hb2, s->xb, w->w3 + l*n_hidden*n_embd, n_embd, n_hidden);
 
         // SwiGLU non-linearity
         for (int i = 0; i < n_hidden; i++) {
@@ -901,7 +996,17 @@ Nano_Session *llm_session_init(Nano_Context *ctx, wchar_t *prompt, unsigned int 
     session->output_count = 0;
 
     session->num_prompt_tokens = 0;
-    uint32_t *prompt_tokens = encode(tokenizer, session->prompt, &(session->num_prompt_tokens));
+    uint32_t *prompt_tokens;
+    if (ctx->llm->arch == LLM_ARCH_NANO || ctx->llm->arch == LLM_ARCH_QWEN2) {
+        prompt_tokens = encode(tokenizer, session->prompt, &(session->num_prompt_tokens));
+    }
+    else if (ctx->llm->arch == LLM_ARCH_QWEN3) {
+        prompt_tokens = apply_qwen_chat_template(tokenizer, session->prompt, &(session->num_prompt_tokens), 1);
+    }
+    else {
+        printf("Error: unknown LLM arch.\n");
+        return NULL;
+    }
 
     for(int i = 0; i < session->num_prompt_tokens; i++) {
         session->output_ids[i] = prompt_tokens[i];
@@ -929,12 +1034,27 @@ int32_t llm_session_step(Nano_Context *ctx, Nano_Session *session) {
 
         if (session->is_prefilling == 0) {
             session->output_ids[session->num_prompt_tokens + (session->output_count)++] = session->next_token;
-            session->output_text = decode(tokenizer, session->output_ids + session->num_prompt_tokens, session->output_count);
+            if (ctx->llm->arch == LLM_ARCH_NANO) {
+                session->output_text = decode(tokenizer, session->output_ids + session->num_prompt_tokens, session->output_count);
+            }
+            else if (ctx->llm->arch == LLM_ARCH_QWEN2 || ctx->llm->arch == LLM_ARCH_QWEN3) {
+                session->output_text = decode_bpe(tokenizer, session->output_ids + session->num_prompt_tokens, session->output_count);
+            }
+            else {
+                printf("Error: unknown LLM arch.\n");
+                return LLM_STOPPED_WITH_ERROR;
+            }
         }
 
         session->pos++;
 
-        if (session->next_token == 0 || session->next_token == 3) {
+        if (ctx->llm->arch == LLM_ARCH_NANO && (session->next_token == 0 || session->next_token == 3)) {
+            return LLM_STOPPED_NORMALLY; // 遇到结束符号，主动结束
+        }
+        else if (
+            (ctx->llm->arch == LLM_ARCH_QWEN2 || ctx->llm->arch == LLM_ARCH_QWEN3) && 
+            (session->is_prefilling == 0) &&
+            (session->next_token == 151643 || session->next_token == 151645)) {
             return LLM_STOPPED_NORMALLY; // 遇到结束符号，主动结束
         }
         else {

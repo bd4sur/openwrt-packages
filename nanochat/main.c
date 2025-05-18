@@ -7,7 +7,7 @@
 
 
 #define ALPHABET_COUNTDOWN_MAX (30)
-#define LONG_PRESS_THRESHOLD (300)
+#define LONG_PRESS_THRESHOLD (360)
 
 
 // 推理引擎实例（单例模式）
@@ -17,6 +17,7 @@ static char *MODEL_PATH_1 = "/emmc/_model/nano_168m_625000_sft_947000.bin";
 static char *MODEL_PATH_2 = "/emmc/_model/nano_56m_99000_sft_v2_200000.bin";
 static char *MODEL_PATH_3 = "/emmc/_model/1-基础模型-99000.bin";
 static char *LORA_PATH_3  = "/emmc/_model/2-插件-猫娘.bin";
+static char *MODEL_PATH_4 = "/emmc/_model/qwen3-0b6.bin";
 
 static float g_tps_of_last_session = 0.0f;
 static wchar_t g_output_of_last_session[OUTPUT_BUFFER_LENGTH];
@@ -48,6 +49,8 @@ int32_t on_decoding(Nano_Session *session) {
     int32_t line_num = render_text(session->output_text, 0);
     render_scroll_bar(line_num, line_num - 5);
     OLED_Refresh();
+
+    free(session->output_text);
     return LLM_RUNNING_IN_DECODING;
 }
 
@@ -82,7 +85,7 @@ int main() {
     float top_p = 0.5f;
     unsigned int top_k = 0;
     unsigned long long random_seed = (unsigned int)time(NULL);
-    uint32_t max_seq_len = 512;
+    uint32_t max_seq_len = 32768;
 
     g_llm_ctx = llm_context_init(MODEL_PATH_1, NULL, repetition_penalty, temperature, top_p, top_k, random_seed);
 
@@ -273,7 +276,7 @@ STATE_0:// 初始状态：等待输入拼音/字母/数字，或者将文字输�
             // 短按B键：转到设置
             else if (key_edge == -1 && key_code == 11) {
                 OLED_SoftClear();
-                render_text(L"选择语言模型：\n\n1. Nano-168M-QA\n2. Nano-56M-QA\n3. Nano-56M-Neko", 0);
+                render_text(L"选择语言模型：\n1. Nano-168M-QA\n2. Nano-56M-QA\n3. Nano-56M-Neko\n4. Qwen3-0.6B", 0);
                 OLED_Refresh();
 
                 STATE = 4;
@@ -521,6 +524,18 @@ STATE_4:// 选择语言模型状态
                 STATE = 0;
             }
 
+            // 短按4键
+            else if (key_edge == -1 && key_code == 4) {
+                llm_context_free(g_llm_ctx);
+                OLED_SoftClear(); render_text(L" 正在加载语言模型\n Qwen3-0.6B\n 请稍等...", 0); OLED_Refresh();
+                g_llm_ctx = llm_context_init(MODEL_PATH_4, NULL, 1.0, 0.6, 0.95, 20, random_seed);
+                OLED_SoftClear(); render_text(L"加载完成~", 0); OLED_Refresh();
+                usleep(1000*1000);
+                render_input_buffer(input_buffer, ime_mode_flag, 1);
+                current_page = 0;
+                STATE = 0;
+            }
+
             // 短按A键：取消操作，回到初始状态
             else if (key_edge == -1 && key_code == 10) {
                 OLED_SoftClear();
@@ -564,7 +579,17 @@ STATE_10: // 提交候选字到LLM，开始推理
             if (key_edge == -1 && key_code == 13) {
                 OLED_SoftClear();
 
-                wchar_t *prompt = apply_chat_template(NULL, NULL, input_buffer);
+                wchar_t *prompt;
+                if (g_llm_ctx->llm->arch == LLM_ARCH_NANO) {
+                    prompt = apply_chat_template(NULL, NULL, input_buffer);
+                }
+                else if (g_llm_ctx->llm->arch == LLM_ARCH_QWEN2 || g_llm_ctx->llm->arch == LLM_ARCH_QWEN3) {
+                    prompt = input_buffer;
+                }
+                else {
+                    fprintf(stderr, "Error: unknown model arch.\n");
+                    exit(EXIT_FAILURE);
+                }
 
                 int32_t flag = generate_sync(g_llm_ctx, prompt, max_seq_len, on_prefilling, on_decoding, on_finished);
 
@@ -584,7 +609,7 @@ STATE_10: // 提交候选字到LLM，开始推理
                     // 计算提示语+生成内容的行数，绘制文本和滚动条
                     OLED_SoftClear();
 
-                    wchar_t prompt_and_output[2048] = L"Homo:\n";
+                    wchar_t prompt_and_output[OUTPUT_BUFFER_LENGTH] = L"Homo:\n";
                     wcscat(prompt_and_output, input_buffer);
                     wcscat(prompt_and_output, L"\n--------------------\nNano:\n");
                     wcscat(prompt_and_output, g_output_of_last_session);
@@ -600,12 +625,28 @@ STATE_10: // 提交候选字到LLM，开始推理
                     STATE = 10;
                 }
                 else {
-                    printf("推理过程异常退出。\n");
+                    printf("推理过程异常结束。\n");
 
+                    // 计算提示语+生成内容的行数，绘制文本和滚动条
                     OLED_SoftClear();
-                    render_text(L"推理过程异常退出。\n\n\n\n按[取消]键返回。", 0);
+
+                    wchar_t prompt_and_output[OUTPUT_BUFFER_LENGTH] = L"Homo:\n";
+                    wcscat(prompt_and_output, input_buffer);
+                    wcscat(prompt_and_output, L"\n--------------------\nNano:\n");
+                    wcscat(prompt_and_output, g_output_of_last_session);
+                    wchar_t tps_wcstr[50];
+                    swprintf(tps_wcstr, 50, L"\n\n推理过程异常结束！\n\n[平均速度%.1f词元/秒]", g_tps_of_last_session);
+                    wcscat(prompt_and_output, tps_wcstr);
+
+                    wcscpy(g_output_of_last_session, prompt_and_output);
+                    output_line_num = render_text(g_output_of_last_session, 0);
+                    render_scroll_bar(output_line_num, output_line_num - 5);
                     OLED_Refresh();
-                    usleep(1000 * 1000);
+
+                    // OLED_SoftClear();
+                    // render_text(L"推理过程异常退出。\n\n\n\n按[取消]键返回。", 0);
+                    // OLED_Refresh();
+                    // usleep(1000 * 1000);
 
                     STATE = 0;
                 }
@@ -614,8 +655,8 @@ STATE_10: // 提交候选字到LLM，开始推理
             // 短按A键：清屏，显示上一轮对话的TPS，回到初始状态
             else if (key_edge == -1 && key_code == 10) {
                 OLED_SoftClear();
-                wchar_t tps_wcstr[1024];
-                swprintf(tps_wcstr, 1024, L"推理结束^_^\n\n平均速度%.1f词元/秒", g_tps_of_last_session);
+                wchar_t tps_wcstr[OUTPUT_BUFFER_LENGTH];
+                swprintf(tps_wcstr, OUTPUT_BUFFER_LENGTH, L"推理结束^_^\n\n平均速度%.1f词元/秒", g_tps_of_last_session);
                 render_text(tps_wcstr, 0);
                 OLED_Refresh();
 

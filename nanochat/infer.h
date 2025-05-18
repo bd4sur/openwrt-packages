@@ -24,7 +24,7 @@
 #include "trie.h"
 
 // 是否使用mmap？
-// #define NANO_USE_MMAP
+#define NANO_USE_MMAP
 
 // 是否使用pthread实现的matmul？（用于OpenWrt等对OpenMP不友好的场景）
 #define MATMUL_PTHREAD
@@ -44,6 +44,10 @@
 
 #define uint32_t unsigned int
 
+#define LLM_ARCH_NANO  (0)
+#define LLM_ARCH_QWEN2 (2)
+#define LLM_ARCH_QWEN3 (3)
+
 #define MAX_TOKEN_LENGTH  (17) // NOTE 虽然可以扫描词表得到该值，但是考虑到性能，设置为固定值（对于16384词表而言，至少17）
 
 #define LLM_RUNNING_IN_PREFILLING (11)
@@ -53,7 +57,7 @@
 #define LLM_STOPPED_IN_PREFILLING (21)
 #define LLM_STOPPED_IN_DECODING   (22)
 
-#define MAX_PROMPT_BUFFER_LENGTH  (2048)
+#define MAX_PROMPT_BUFFER_LENGTH  (16384)
 
 // ===============================================================================
 // 数据结构定义
@@ -68,37 +72,48 @@ typedef struct {
     uint32_t n_kv_head;
     uint32_t n_hidden;
     uint32_t is_shared_classifier;
+    uint32_t head_dim; // 对于Nano和Qwen2为0，head_dim等于n_embd/n_head，q、k、v向量的维数固定为n_embd。对于Qwen3为固定值，该值决定了q、k、v向量的维数。
 } LLM_Config;
 
 typedef struct {
-    float* token_embedding;    // (vocab_size, n_embd)
-    float* rms_norm_attn;      // (layer, n_embd)
+    float *token_embedding; // (vocab_size, n_embd)
+    float *rms_norm_attn;   // (layer, n_embd)
 
-    float* wq; // (layer, n_embd, n_heads * head_size)
-    float* wk; // (layer, n_embd, n_kv_heads * head_size)
-    float* wv; // (layer, n_embd, n_kv_heads * head_size)
-    float* wo; // (layer, n_heads * head_size, n_embd)
+    float *wq;              // (layer, n_embd, n_heads * head_dim)
+    float *wk;              // (layer, n_embd, n_kv_heads * head_dim)
+    float *wv;              // (layer, n_embd, n_kv_heads * head_dim)
+    float *wo;              // (layer, n_heads * head_dim, n_embd)
 
-    float* rms_norm_ffn; // (layer, n_embd)
+    // Qwen2 only
+    float *bq;              // (layer, n_heads * head_dim)
+    float *bk;              // (layer, n_kv_heads * head_dim)
+    float *bv;              // (layer, n_kv_heads * head_dim)
 
-    float* w1; // (layer, n_hidden, n_embd)
-    float* w2; // (layer, n_embd, n_hidden)
-    float* w3; // (layer, n_hidden, n_embd)
+    // Qwen3 only
+    float *q_norm;          // (layer, head_size)
+    float *k_norm;          // (layer, head_size)
 
-    float* rms_norm_final; // (n_embd,)
+    float *rms_norm_ffn;    // (layer, n_embd)
 
-    float* token_classifier;
-    float* freq_cis_real;
-    float* freq_cis_imag;
+    float *w1;              // (layer, n_hidden, n_embd)
+    float *w2;              // (layer, n_embd, n_hidden)
+    float *w3;              // (layer, n_hidden, n_embd)
+
+    float *rms_norm_final;  // (n_embd,)
+
+    float *token_classifier;// (vocab_size, n_embd)
+    float *freq_cis_real;
+    float *freq_cis_imag;
 } LLM_Param;
 
 typedef struct {
     float *x;       // activation at current time stamp (n_embd,)
     float *xb;      // same, but inside a residual branch (n_embd,)
+    float *xba;     // output of attention block (q_dim,) q_dim = (n_embd if model == Nano||Qwen2 else (head_dim * n_head))
     float *xb2;     // an additional buffer just for convenience (n_embd,)
     float *hb;      // buffer for hidden dimension in the ffn (n_hidden,)
     float *hb2;     // buffer for hidden dimension in the ffn (n_hidden,)
-    float *q;       // query (n_embd,)
+    float *q;       // query (q_dim,) q_dim = (n_embd if model == Nano||Qwen2 else (head_dim * n_head))
     float *k;       // key (kv_dim,)
     float *v;       // value (kv_dim,)
     float *k_cache; // (layer, block_size, kv_dim)
@@ -120,7 +135,9 @@ typedef struct {
     LLM_Config config;
     LLM_Param params;
     FwdBuffer state;
-    // some more state needed to properly clean up the memory mapping (sigh)
+    // 语言模型架构类别
+    uint32_t arch;
+    // 与mmap相关的
     int fd;            // file descriptor for memory mapping
     char *buffer;       // memory mapped data pointer
     size_t file_size; // size of the checkpoint file in bytes
@@ -154,13 +171,27 @@ typedef struct {
     float *data;
 } LoRA;
 
+// 仅用于LLM_ARCH_QWEN2/3
 typedef struct {
+    char *str;
+    int id;
+} TokenIndex;
+
+typedef struct {
+    // 共享
     uint32_t vocab_size;
+    // 仅LLM_ARCH_NANO
     wchar_t *unicode_charset;
     wchar_t **token_list;
     struct Trie *vocab_trie;
     struct Map *unicode_to_id_map;
     struct Map *token_to_id_map;
+    // 仅LLM_ARCH_QWEN2/3
+    char** vocab;
+    float* vocab_scores;
+    TokenIndex *sorted_vocab;
+    unsigned int max_token_length;
+    unsigned char byte_pieces[512]; // stores all single-byte strings
 } Tokenizer;
 
 typedef struct {
