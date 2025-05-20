@@ -12,16 +12,285 @@
 import json
 import struct
 import argparse
+import math
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
-from model import ModelArgs, Transformer
+
+#########################################################
+#  模型结构定义
+#########################################################
+
+@dataclass
+class ModelArgs:
+    dim: int = 1024
+    n_layers: int = 28
+    n_heads: int = 16
+    n_kv_heads: Optional[int] = 8
+    head_dim: Optional[int] = 128
+    vocab_size: int = 151936
+    hidden_dim: Optional[int] = 3072
+    multiple_of: int = 256  # MLP hidden layer size will be multiple of
+    norm_eps: float = 1e-6
+    max_seq_len: int = 40960
+    dropout: float = 0.0
 
 
-# -----------------------------------------------------------------------------
-# common utilities
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 1000000.0):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device)  # type: ignore
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+    freqs_cos = torch.cos(freqs)  # real part
+    freqs_sin = torch.sin(freqs)  # imaginary part
+    return freqs_cos, freqs_sin
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(shape)
+
+def apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cos: torch.Tensor,
+    freqs_sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    # reshape xq and xk to match the complex representation
+    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
+    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+
+    # reshape freqs_cos and freqs_sin for broadcasting
+    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
+    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+
+    # apply rotation using real numbers
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
+    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+
+    # flatten last two dimensions
+    xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1).flatten(3)
+    xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
+
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        x[:, :, :, None, :]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
+class Attention(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        assert args.n_heads % self.n_kv_heads == 0
+        model_parallel_size = 1
+        self.n_local_heads = args.n_heads // model_parallel_size
+        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.head_dim = 128 # args.dim // args.n_heads # Qwen3
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        self.q_norm = RMSNorm(self.head_dim, eps=args.norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=args.norm_eps)
+        self.attn_dropout = nn.Dropout(args.dropout)
+        self.resid_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
+
+        # use flash attention or a manual implementation?
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
+            mask = torch.triu(mask, diagonal=1)
+            self.register_buffer("mask", mask)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+    ):
+        bsz, seqlen, _ = x.shape
+
+        # QKV
+        xq, xk, xv = self.q_norm(self.wq(x)), self.k_norm(self.wk(x)), self.wv(x) # Qwen3
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        # RoPE relative positional embeddings
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+
+        # grouped multiquery attention: expand out keys and values
+        xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+        # make heads into a batch dimension
+        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
+        # flash implementation
+        if self.flash:
+            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        else:
+            # manual implementation
+            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            assert hasattr(self, 'mask')
+            scores = scores + self.mask[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+
+        # restore time as batch dimension and concat heads
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+
+        # final projection into the residual stream
+        output = self.wo(output)
+        output = self.resid_dropout(output)
+        return output
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = 4 * dim
+            hidden_dim = int(2 * hidden_dim / 3)
+            hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, layer_id: int, args: ModelArgs):
+        super().__init__()
+        self.n_heads = args.n_heads
+        self.dim = args.dim
+        self.head_dim = 128 # args.dim // args.n_heads # Qwen3
+        self.attention = Attention(args)
+        self.feed_forward = FeedForward(
+            dim=args.dim,
+            hidden_dim=args.hidden_dim,
+            multiple_of=args.multiple_of,
+            dropout=args.dropout,
+        )
+        self.layer_id = layer_id
+        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+
+    def forward(self, x, freqs_cos, freqs_sin):
+        h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        return out
+
+
+class Transformer(nn.Module):
+    last_loss: Optional[torch.Tensor]
+
+    def __init__(self, params: ModelArgs):
+        super().__init__()
+        self.params = params
+        self.vocab_size = params.vocab_size
+        self.n_layers = params.n_layers
+
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+        self.dropout = nn.Dropout(params.dropout)
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(params.n_layers):
+            self.layers.append(TransformerBlock(layer_id, params))
+        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
+        # share the unembedding parameters with the embedding parameters
+        self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+
+        # some useful precompute for the RoPE relative positional embeddings
+        freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
+
+        # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
+        self.last_loss = None
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
+        _bsz, seqlen = tokens.shape
+        h = self.tok_embeddings(tokens)
+        h = self.dropout(h)
+        freqs_cos = self.freqs_cos[:seqlen]
+        freqs_sin = self.freqs_sin[:seqlen]
+
+        for layer in self.layers:
+            h = layer(h, freqs_cos, freqs_sin)
+        h = self.norm(h)
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.output(h)
+            self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # inference-time mini-optimization: only forward the output on the very last position
+            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            self.last_loss = None
+
+        return logits
+
+
+#########################################################
+#  数组量化&序列化写入文件
+#########################################################
 
 def serialize_fp32(file, tensor):
     """ writes one fp32 tensor to file that is open in wb mode """
@@ -67,7 +336,9 @@ def quantize_q80(w, group_size):
 
 
 
-#############################################
+#########################################################
+#  BPE词元编解码器的序列化
+#########################################################
 
 # this is a horrible gpt-2 unicode byte encoder hack from https://github.com/openai/gpt-2/blob/master/src/encoder.py#L9
 # this has poisoned all HF tokenizer configs that use ByteLevel decoder/preprocessor
@@ -160,6 +431,9 @@ def serialize_tokenizer(file):
     print(f"Write count = {write_count}")
 
 
+#########################################################
+#  模型导出
+#########################################################
 
 def export_model(model, filepath):
     """
@@ -279,141 +553,10 @@ def export_model(model, filepath):
 
 
 
-def export_quantized(model, tokenizer_config, filepath, group_size=64):
-    """
-    Export the model weights in Q8_0 into .bin file to be read from C.
-    That is:
-    - quantize all weights to symmetric int8, in range [-127, 127]
-    - all other tensors (the rmsnorm params) are kept and exported in fp32
-    - quantization is done in groups of group_size to reduce the effects of any outliers
-    """
 
-    cfg = model.config
-    out_file = open(filepath, 'wb')
-
-    #########################################################
-    # 写入文件头（固定长度256B）
-
-    print("Writing header...")
-
-    major_version = 2024
-    minor_version = 10
-
-    # 1) write magic, which will be two uint32 of "BD4SURLM" in ASCII
-    out_file.write(struct.pack('I', 0x42443453))
-    out_file.write(struct.pack('I', 0x55524c4d))
-    # --> 8 bytes
-
-    # 2) write version, which will be int
-    out_file.write(struct.pack('i', major_version))
-    out_file.write(struct.pack('i', minor_version))
-    # --> 16 bytes
-
-    # 3) write file type TODO to be defined
-    out_file.write(struct.pack('i', 0))  # Model type: Base model
-    out_file.write(struct.pack('i', 32)) # Config Length: 32 bytes
-    # --> 24 bytes
-
-    # 4) write the model config, which will be 8 ints (32 bytes)
-    cfg = model.config
-    is_shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
-    header = struct.pack(
-        "iiiiiiii",
-        cfg.block_size,
-        cfg.vocab_size,
-        cfg.n_layer,
-        cfg.n_embd,
-        cfg.n_head,
-        cfg.n_kv_head if cfg.n_kv_head is not None else cfg.n_head,
-        cfg.n_hidden if cfg.n_hidden is not None else model.layers[0].feed_forward.w1.weight.shape[0],
-        int(is_shared_classifier)
-    )
-    out_file.write(header)
-    # --> 56 bytes
-
-    # 5) write some other flags
-    out_file.write(struct.pack('i', 800))        # 量化类型 TODO 待定义
-    out_file.write(struct.pack('i', group_size)) # 量化参数(分组长度)
-
-    # 6) pad rest with zeros; 'tell' returns current pos
-    pad = 256 - out_file.tell()
-    assert pad >= 0
-    out_file.write(b'\0' * pad)
-
-
-    #########################################################
-    # 写入词表
-
-    print("Writing tokenizer...")
-    serialize_tokenizer(out_file, tokenizer_config)
-
-
-    #########################################################
-    # 校验量化参数
-
-    while cfg.n_embd % group_size != 0:
-        group_size //= 2
-        print(f"BACKOFF: reducing group size to {group_size} to fit hidden_dim")
-
-    weights = [
-        model.tok_embeddings.weight,
-        *[layer.attention.wq.weight for layer in model.layers],
-        *[layer.attention.wk.weight for layer in model.layers],
-        *[layer.attention.wv.weight for layer in model.layers],
-        *[layer.attention.wo.weight for layer in model.layers],
-        *[layer.feed_forward.w1.weight for layer in model.layers],
-        *[layer.feed_forward.w2.weight for layer in model.layers],
-        *[layer.feed_forward.w3.weight for layer in model.layers],
-    ]
-    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
-    if not shared_classifier:
-        weights.append(model.output.weight)
-    for w in weights:
-        assert w.numel() % group_size == 0, f"weight {i} has numel {w.numel()}, not a multiple of group_size {group_size}"
-
-
-    #########################################################
-    # 量化并写入模型参数
-    # NOTE 注意：与非量化的参数排列顺序不同！
-
-    print("Quantizing and writing model parameters...")
-
-    # first let's write out all the params that we are keeping in fp32: the norms
-    for layer in model.layers: # attention norms
-        serialize_fp32(out_file, layer.attention_norm.weight)
-    for layer in model.layers: # MLP norms
-        serialize_fp32(out_file, layer.ffn_norm.weight)
-    serialize_fp32(out_file, model.norm.weight) # final pre-classifier norm
-
-    # now let's write out all the params that we are quantizing to Q8_0
-    # note we skip classifier weights, which are shared with the embedding
-    ew = []
-    for i, w in enumerate(weights):
-        q, s, err = quantize_q80(w, group_size)
-        serialize_int8(out_file, q) # save the tensor in int8
-        serialize_fp32(out_file, s) # save scale factors
-        ew.append((err, w.shape))
-        print(f"{i+1}/{len(weights)} quantized {tuple(w.shape)} to Q8_0 with max error {err}")
-
-    # print the highest error across all weights, should be very small, e.g. O(~0.001)
-    ew.sort(reverse=True)
-    print(f"max quantization group error across all weights: {ew[0][0]}")
-
-    # 最后写入RoPE参数
-    serialize_fp32(out_file, model.freqs_cos)
-    serialize_fp32(out_file, model.freqs_sin)
-
-
-    #########################################################
-    # 写入并关闭文件
-
-    out_file.close()
-    print(f"wrote {filepath}")
-
-
-# -----------------------------------------------------------------------------
-# Load / import functions
-
+#########################################################
+#  载入HuggingFace模型
+#########################################################
 
 def load_hf_model(model_path):
 
@@ -508,23 +651,9 @@ def load_hf_model(model_path):
     return model
 
 
-def load_lora(lora_path):
-    print(f"LoRA module file path: {lora_path}")
-    checkpoint_dict = torch.load(lora_path, map_location='cpu')
-    if checkpoint_dict["is_lora"]:
-        train_config = checkpoint_dict["train_config"]
-        model_config = checkpoint_dict["model_config"]
-        lora_config = {
-            "lora_rank": train_config.lora_rank,
-            "lora_alpha": train_config.lora_alpha,
-        }
-        return checkpoint_dict["lora"], lora_config, model_config
-    else:
-        return False
-
-
-# -----------------------------------------------------------------------------
-# CLI entrypoint
+#########################################################
+#  入口点
+#########################################################
 
 if __name__ == "__main__":
 
